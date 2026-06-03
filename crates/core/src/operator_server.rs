@@ -53,7 +53,11 @@ impl Default for ConfirmChannel {
     }
 }
 
-pub async fn run(sock_path: &Path, broker: ConfirmationBroker) -> std::io::Result<()> {
+pub async fn run(
+    sock_path: &Path,
+    broker: ConfirmationBroker,
+    channel: ConfirmChannel,
+) -> std::io::Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -61,7 +65,6 @@ pub async fn run(sock_path: &Path, broker: ConfirmationBroker) -> std::io::Resul
         std::fs::remove_file(sock_path)?;
     }
     let listener = UnixListener::bind(sock_path)?;
-    let channel = ConfirmChannel::new();
     let channel = Arc::new(channel);
 
     loop {
@@ -79,10 +82,45 @@ pub async fn run(sock_path: &Path, broker: ConfirmationBroker) -> std::io::Resul
 async fn handle(
     stream: UnixStream,
     broker: ConfirmationBroker,
-    _channel: Arc<ConfirmChannel>,
+    channel: Arc<ConfirmChannel>,
 ) -> std::io::Result<()> {
-    let (read, mut write) = stream.into_split();
+    let (read, write) = stream.into_split();
+    // The write half is shared between two tasks:
+    //   - the read loop, which writes JSON-RPC responses to client RPCs
+    //   - the push task, which writes server-pushed `confirm.request` events
+    // We wrap it in an Arc<Mutex<...>> so both can write without races.
+    let write = Arc::new(tokio::sync::Mutex::new(write));
     let mut lines = BufReader::new(read).lines();
+    let mut events = channel.subscribe();
+
+    // Forward server-pushed `confirm.request` notifications to the client.
+    // The Tauri shell filters on `method == "confirm.request"`.
+    let write_for_push = write.clone();
+    let push_task = tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(req) => {
+                    let payload = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "confirm.request",
+                        "params": req,
+                    });
+                    let mut w = write_for_push.lock().await;
+                    if w.write_all(payload.to_string().as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if w.write_all(b"\n").await.is_err() {
+                        break;
+                    }
+                    if w.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 
     while let Some(line) = lines.next_line().await? {
         let line = line.trim();
@@ -95,11 +133,13 @@ async fn handle(
         };
 
         if let Some(r) = resp {
-            write.write_all(r.as_bytes()).await?;
-            write.write_all(b"\n").await?;
-            write.flush().await?;
+            let mut w = write.lock().await;
+            w.write_all(r.as_bytes()).await?;
+            w.write_all(b"\n").await?;
+            w.flush().await?;
         }
     }
+    push_task.abort();
     Ok(())
 }
 

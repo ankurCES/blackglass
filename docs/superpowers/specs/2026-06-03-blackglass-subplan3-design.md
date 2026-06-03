@@ -700,3 +700,72 @@ fixed. Sub-plan 3 is **not** considered green from a manual-smoke
 perspective; do not declare the sub-plan complete until the
 follow-up lands.
 
+### 13.1 Fix landed (2026-06-03)
+
+The wiring gap described above was fixed in a follow-up commit. The
+fix is small (≈70 lines net) and lives entirely in `crates/core`:
+
+- `crates/core/src/gates.rs` — new `BrokerGate3` struct implementing
+  the existing `Gate3` trait. It wraps a `ConfirmationBroker` and a
+  `ConfirmChannel`: on `confirm(req)` it calls `broker.register()` to
+  get a `(id, oneshot::Receiver<Decision>)`, pushes a `ConfirmRequest`
+  to the channel (which the operator socket forwards verbatim to
+  connected clients), then awaits `rx` with a 15 s timeout. Three unit
+  tests cover Allow, Timeout, and the `new_anonymous` constructor.
+- `crates/core/src/operator_server.rs` — `run()` now takes the
+  `ConfirmChannel` as a third argument (instead of constructing its
+  own), and `handle()` subscribes to the channel and forwards
+  `confirm.request` notifications to the connected client. The write
+  half of the socket is wrapped in `Arc<tokio::sync::Mutex<...>>` so
+  both the read loop (RPC responses) and the push task (server-pushed
+  notifications) can write without racing. The new test
+  `channel_push_forwards_to_connected_client` exercises the path:
+  push a `ConfirmRequest` *after* a client has connected, assert the
+  client receives a JSON line with `method: "confirm.request"`.
+- `crates/core/src/main.rs` — `Chokepoint::new` now wires
+  `BrokerGate3::new_anonymous(broker, channel)` as the Gate 3. The
+  same `broker` and `channel` are then passed to
+  `operator_server::run` so the chokepoint's push and the operator
+  server's forward see the same `ConfirmRequest` stream.
+- `crates/core/tests/end_to_end_gate3.rs` — two new in-process
+  end-to-end tests that stand up `Server` (runtime RPC) +
+  `operator_server::run` (Tauri-facing) in the same test process and
+  exercise the full happy path:
+  - `destructive_action_requires_operator_allow`: connects a
+    runtime client, sends `execute_action{class: destructive}`, then
+    connects an operator client, reads the server-pushed
+    `confirm.request`, sends `confirm.resolve{decision: "allow"}`,
+    then reads the runtime client's blocked response. Asserts the
+    response is `ok: true` and the audit log contains
+    `action_requested` + `action_executed` (no `action_denied`).
+  - `destructive_action_can_be_denied_by_operator`: same setup but
+    the operator sends `decision: "deny"`. Asserts the runtime
+    response is `ok: false` and the audit log contains
+    `action_denied` with `gate: 3` (no `action_executed`).
+
+Test counts after the fix: 60 Rust (was 54) + 6 Svelte = 66, all
+green. The two new `end_to_end_gate3` tests are the closest
+headless equivalent to a manual `cargo tauri dev` smoke test — they
+prove the wire format, the channel bridge, the broker round-trip,
+and the audit log wiring, all without a desktop session.
+
+What is still NOT covered: an actual Tauri window running against
+the real `operator.sock` while `blackglass-core` is alive. The
+`App.svelte`/`ConfirmModal.svelte` code path (which subscribes to
+the Tauri event bus and renders the modal) is unit-tested with
+`@testing-library/svelte` but not exercised end-to-end against a
+live `operator.sock`. That's an integration-environment concern,
+not a code concern, and is the right scope for a later packaging
+sub-plan.
+
+### 13.2 Revised status
+
+The "Decision" subsection above (saying sub-plan 3 is not green
+from a manual-smoke perspective) was true on 2026-06-03 and is
+no longer true after the §13.1 fix landed in the same session.
+Sub-plan 3 is now **green** from a code-wiring and headless-e2e
+perspective: every step of the operator confirmation flow is
+covered by an automated test. The remaining gap (interactive
+Tauri window) is unchanged and is correctly scoped to the
+packaging sub-plan.
+

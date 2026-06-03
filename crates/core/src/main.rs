@@ -2,7 +2,8 @@ use anyhow::Result;
 use blackglass_audit::Chain;
 use blackglass_core::broker::ConfirmationBroker;
 use blackglass_core::chokepoint::Chokepoint;
-use blackglass_core::gates::AllowAll;
+use blackglass_core::gates::BrokerGate3;
+use blackglass_core::operator_server::ConfirmChannel;
 use blackglass_core::sanitizer::RealSanitizer;
 use blackglass_core::server::Server;
 use blackglass_engagement::Engagement;
@@ -69,25 +70,40 @@ async fn main() -> Result<()> {
                 "1970-01-01T00:00:00Z",
                 "9999-12-31T00:00:00Z",
             );
+            // Gate 3 (operator confirmation) needs a broker AND a channel.
+            // The channel is shared: BrokerGate3 pushes requests to it, and
+            // operator_server::run reads from it to forward to Tauri clients.
+            let broker = ConfirmationBroker::new();
+            let channel = ConfirmChannel::new();
+            let gate3: Arc<dyn blackglass_core::gates::Gate3> =
+                Arc::new(BrokerGate3::new_anonymous(broker.clone(), channel.clone()));
             let cp = Chokepoint::new(
                 chain,
                 profile,
                 eng,
-                Arc::new(AllowAll),
+                gate3,
                 Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone())),
             )
             .with_evidence_dir(evidence_dir);
             // Sub-plan 3: operator socket (Tauri UI). Runs concurrently with
-            // the runtime socket accept loop below.
+            // the runtime socket accept loop below. We pass it the same
+            // broker (to resolve confirmations) and the same channel (to
+            // subscribe to pending confirmations).
             let data_dir = socket
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| PathBuf::from("."));
-            let broker = ConfirmationBroker::new();
             let operator_sock = data_dir.join("operator.sock");
             let op_broker = broker.clone();
+            let op_channel = channel.clone();
             tokio::spawn(async move {
-                if let Err(e) = blackglass_core::operator_server::run(&operator_sock, op_broker).await {
+                if let Err(e) = blackglass_core::operator_server::run(
+                    &operator_sock,
+                    op_broker,
+                    op_channel,
+                )
+                .await
+                {
                     eprintln!("operator socket error: {e}");
                 }
             });

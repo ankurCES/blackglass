@@ -14,3 +14,7 @@ Cargo.lock.bak
 *.log
 *.pcap
 *.pcap-*
+
+# Tauri-generated (build outputs, regenerated on `cargo tauri build`)
+/app/src-tauri/gen/
+/app/src-tauri/target/
