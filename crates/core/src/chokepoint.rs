@@ -397,13 +397,8 @@ pub mod r#async {
     }
 
     fn now_iso8601() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        // Minimal ISO-8601 (UTC, second precision) — enough for tests.
-        // NOTE: the legacy `iso8601_utc_now` in the parent module does
-        // proper date math and is used by the legacy `Chokepoint` API.
-        // This helper is used only by the new `evaluate` function.
-        format!("1970-01-01T00:00:{secs}Z")
+        // Delegate to the parent module's properly-implemented helper.
+        super::iso8601_utc_now()
     }
 }
 
