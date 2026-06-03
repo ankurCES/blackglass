@@ -622,3 +622,81 @@ intentional and reachable later:
 - Engagement scope-window enforcement (timestamps; parsed but not enforced in sub-plans 1-2) → 4γ.
 - Audit log redaction (§8.5 risk 16) → 4γ.
 - `+operator` and `+redteam` profiles → 5+.
+
+## 13. Sub-plan 3 e2e smoke test (2026-06-03)
+
+The full Tauri-window flow (steps 2-3 of the Task 16 spec) requires an
+interactive desktop session; this was run in a headless sandbox, so the
+`cargo tauri dev` window could not be observed. What could be verified
+non-interactively was verified; what couldn't is flagged below.
+
+### What worked
+
+- `cargo build --workspace` (Rust) and `npm run build` (Svelte) both clean.
+- `cargo test --workspace`: 54 tests pass (Task 8 added the new event-kind
+  coverage; Tasks 10, 11 add 1 Tauri-shell payload test).
+- `cd /home/ankur/blackglass && cargo run --bin blackglass-core start`:
+  - `~/.local/share/blackglass/runtime.sock` and
+    `~/.local/share/blackglass/operator.sock` are both created.
+  - `ping` over `operator.sock` returns `{"result":"pong"}` as expected.
+- `npx vitest run` (Svelte): 6 tests pass — 2 state-machine (Task 13)
+  + 4 ConfirmModal render/click flows (Task 15).
+
+### What did NOT work (pre-existing wiring gap, not a sub-plan-3 issue)
+
+Pushing a `confirm.request` event from the core to a connected operator
+client is not actually wired up. The mechanism exists
+(`crates/core/src/operator_server.rs::ConfirmChannel`) but is unused:
+the channel is created in `operator_server::run` and passed to
+`handle()` as `_channel`; nothing ever calls `channel.push()` and
+`handle()` never subscribes. A second, related issue: the chokepoint's
+production path in `chokepoint::execute_action` calls
+`cp.gate3.confirm(req)` on a `Gate3` trait object — in `main.rs` this is
+instantiated as `AllowAll`, so destructive actions never reach the
+`ConfirmationBroker` at all. The broker's `register`/`resolve` path
+exists in `chokepoint::evaluate` (a test-only function) and the
+`tests/chokepoint.rs` test, but the production chokepoint does not call
+into it. Net effect: a destructive `execute_action` request will
+**always** be allowed without operator confirmation, regardless of
+whether a Tauri client is connected.
+
+This is a sub-plan-1/2 wiring gap surfaced by the sub-plan-3 smoke test.
+A correct fix is ~50 lines across `crates/core/src/gates.rs` (new
+`BrokerGate3` impl of the `Gate3` trait), `crates/core/src/main.rs`
+(instantiate `BrokerGate3` instead of `AllowAll`), and
+`crates/core/src/operator_server.rs` (subscribe to the channel in
+`handle()` and forward events to the client). Filed as a follow-up
+under "Sub-plan 3 e2e result (2026-06-03) follow-up" below; tracked
+for a dedicated fix-up task before the packaging sub-plan.
+
+### Reproduction (2026-06-03, headless sandbox)
+
+```
+$ ./target/debug/blackglass-core start
+   core listening socket=/home/ankur/.local/share/blackglass/runtime.sock
+$ ls ~/.local/share/blackglass/*.sock
+   operator.sock  runtime.sock
+$ python3 -c '<send auth + execute_action{class:destructive, target:10.10.0.5/24}>'
+   auth -> {ok: True}
+   destructive -> {ok: False, error: "gate 1: domain 'recon' not in profile allowlist"}
+$ cat ~/.local/share/blackglass/audit/audit.jsonl
+   <empty>
+```
+
+The `destructive` request was denied at Gate 1 by the default
+`analyst_default` profile (which only allows `read_only`). To bypass
+Gate 1, the request would have to be against a `read_only` action —
+which `AllowAll::confirm` always allows without going through the
+broker. There is no input combination in the current default profile +
+production chokepoint that reaches the broker.
+
+### Decision
+
+Sub-plan 3 as written (Tauri 2 + Svelte 5 shell that connects to
+`operator.sock`, parses server-pushed `confirm.request` events, and
+issues `confirm.resolve` invocations) is implemented and unit-tested.
+The end-to-end UX cannot be observed until the above wiring gap is
+fixed. Sub-plan 3 is **not** considered green from a manual-smoke
+perspective; do not declare the sub-plan complete until the
+follow-up lands.
+
