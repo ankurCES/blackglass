@@ -10,6 +10,7 @@ members = [
     "crates/runtime",
     "crates/mcp-osint",
     "crates/mcp-packets",
+    "app/src-tauri",
 ]
 
 [workspace.package]
