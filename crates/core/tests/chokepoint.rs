@@ -47,8 +47,11 @@ async fn denies_action_against_out_of_scope_target() {
 }
 
 struct DenyAll;
+#[async_trait::async_trait]
 impl Gate3 for DenyAll {
-    fn confirm(&self, _req: &ActionRequest) -> Result<(), String> { Err("user said no".into()) }
+    async fn confirm(&self, _req: &ActionRequest) -> blackglass_core::gates::ConfirmationOutcome {
+        blackglass_core::gates::ConfirmationOutcome::Deny
+    }
 }
 
 #[tokio::test]
@@ -68,7 +71,7 @@ async fn gate3_denial_is_logged_and_propagated() {
         domain: "osint".into(), action_class: "read_only".into(),
         target: "10.0.0.5".into(), args: json!({}),
     }).await.unwrap_err();
-    assert!(err.to_string().contains("user said no"));
+    assert!(err.to_string().contains("deny"), "expected 'deny' in err, got: {err}");
     let count = Chain::verify(&audit_path).unwrap();
     assert!(count >= 2, "expected at least 2 audit events, got {count}");
 }
@@ -156,4 +159,18 @@ async fn pi_detection_emits_audit_event_and_writes_evidence() {
         .filter_map(|e| e.ok())
         .collect();
     assert!(!evidence_files.is_empty(), "expected evidence file written");
+}
+
+#[tokio::test]
+async fn gate3_returns_allow_outcome() {
+    use blackglass_core::gates::{ActionRequest, AllowAll, ConfirmationOutcome, Gate3};
+    let g = AllowAll;
+    let req = ActionRequest {
+        domain: "recon".into(),
+        action_class: "destructive".into(),
+        target: "10.0.0.1".into(),
+        args: serde_json::json!({}),
+    };
+    let outcome = g.confirm(&req).await;
+    assert!(matches!(outcome, ConfirmationOutcome::Allow));
 }

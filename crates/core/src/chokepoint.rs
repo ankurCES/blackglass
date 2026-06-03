@@ -1,7 +1,7 @@
 //! The single chokepoint. Every privileged action goes through here.
 //! See spec §2.1, §4.
 
-use crate::gates::{ActionRequest, Gate3, Gate4};
+use crate::gates::{ActionRequest, ConfirmationOutcome, Gate3, Gate4};
 use blackglass_audit::{Chain, Event, EventKind};
 use blackglass_engagement::Engagement;
 use blackglass_profile::Profile;
@@ -87,9 +87,14 @@ pub async fn execute_action(cp: &mut Chokepoint, req: ActionRequest) -> Result<O
     }
     cp.audit(EventKind::ActionRequested, json!({"req": &req}))?;
 
-    if let Err(reason) = cp.gate3.confirm(&req) {
-        cp.audit(EventKind::ActionDenied, json!({"gate":3, "reason": &reason, "req": &req}))?;
-        return Err(ChokepointError::Gate3Denied(reason));
+    let outcome = cp.gate3.confirm(&req).await;
+    match outcome {
+        ConfirmationOutcome::Allow | ConfirmationOutcome::AllowAndRemember => {}
+        _ => {
+            let reason = outcome.as_decision_str().to_string();
+            cp.audit(EventKind::ActionDenied, json!({"gate":3, "reason": &reason, "req": &req}))?;
+            return Err(ChokepointError::Gate3Denied(reason));
+        }
     }
     cp.audit(EventKind::ActionAllowed, json!({"req": &req}))?;
 
