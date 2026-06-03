@@ -3,6 +3,14 @@ name = "blackglass-app"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "blackglass-app"
+path = "src/main.rs"
+
+[lib]
+name = "blackglass_app"
+path = "src/lib.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

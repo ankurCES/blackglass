@@ -7,6 +7,8 @@ use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
+use blackglass_app::build_confirm_resolve;
+
 #[derive(Clone, Serialize)]
 struct OperatorEvent {
     kind: String,
@@ -76,12 +78,7 @@ async fn confirm_resolve(
     decision: String,
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
-    let payload = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": null,
-        "method": "confirm.resolve",
-        "params": { "id": id, "decision": decision }
-    });
+    let payload = build_confirm_resolve(&id, &decision);
     let mut w = state.0.lock().await;
     w.write_all(payload.to_string().as_bytes())
         .await
