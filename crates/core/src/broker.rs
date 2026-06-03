@@ -46,6 +46,16 @@ impl ConfirmationBroker {
         }
     }
 
+    /// Snapshot of the currently-pending confirmation ids. Test-only helper:
+    /// the production operator-socket handler is notified via the
+    /// `register()` round-trip, but in unit tests we need a way to discover
+    /// ids that `evaluate()` registered so a stand-in resolver can call
+    /// `resolve()`. This is an additive API and does not change the
+    /// production resolver path.
+    pub async fn pending_ids(&self) -> Vec<String> {
+        self.inner.lock().await.keys().cloned().collect()
+    }
+
     pub async fn is_empty(&self) -> bool {
         self.inner.lock().await.is_empty()
     }

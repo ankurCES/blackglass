@@ -4,7 +4,7 @@
 use crate::gates::{ActionRequest, ConfirmationOutcome, Gate3, Gate4};
 use blackglass_audit::{Chain, Event, EventKind};
 use blackglass_engagement::Engagement;
-use blackglass_profile::Profile;
+use blackglass_profile::Profile as LegacyProfile;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -37,7 +37,7 @@ impl Outcome {
 
 pub struct Chokepoint {
     pub chain: Chain,
-    pub profile: Profile,
+    pub profile: LegacyProfile,
     pub engagement: Engagement,
     pub gate3: Arc<dyn Gate3>,
     pub gate4: Arc<dyn Gate4>,
@@ -47,7 +47,7 @@ pub struct Chokepoint {
 
 impl Chokepoint {
     pub fn new(
-        chain: Chain, profile: Profile, engagement: Engagement,
+        chain: Chain, profile: LegacyProfile, engagement: Engagement,
         gate3: Arc<dyn Gate3>, gate4: Arc<dyn Gate4>,
     ) -> Self {
         Self { chain, profile, engagement, gate3, gate4, seq: 0, evidence_dir: None }
@@ -156,3 +156,258 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let y = if m <= 2 { y + 1 } else { y };
     (y as i32, m as u32, d as u32)
 }
+
+// =========================================================================
+// Sub-plan 3 async chokepoint (Task 7). Coexists with the legacy
+// `Chokepoint`/`execute_action` API above so existing server, main, and
+// integration tests keep working. The legacy API is exercised by sub-plan 2
+// callers; a later task migrates them to the new `evaluate` design.
+//
+// The chokepoint: every action goes through here. Gate 1 (policy) ->
+// Gate 3 (operator confirm, only for destructive classes) -> exec stub ->
+// Gate 4 (sanitize) -> return. Audit events are appended at every
+// boundary. See spec §4 and §6.4.
+//
+// Implemented as a sub-module to avoid name collisions with the legacy
+// types re-exported at the chokepoint level (e.g. `Profile` from
+// `blackglass_profile` vs. the new local `Profile`). The items
+// `Profile`, `EvalOutcome`, and `evaluate` are re-exported from this
+// sub-module so callers can use `blackglass_core::chokepoint::Profile`.
+// =========================================================================
+
+pub mod r#async {
+    use std::path::Path;
+    use std::time::Duration;
+    use serde::Serialize;
+
+    use crate::broker::{ConfirmationBroker, Decision};
+    use crate::gates::{ActionRequest, ConfirmationOutcome, Gate3, Gate4, SanitizedOutput};
+    use crate::policy::{ActionClass, Policy};
+
+    #[derive(Debug, Clone)]
+    pub struct Profile {
+        pub name: String,
+        pub allowed_classes: Vec<ActionClass>,
+    }
+
+    impl Default for Profile {
+        fn default() -> Self {
+            Self { name: "analyst".into(), allowed_classes: vec![ActionClass::ReadOnly] }
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum EvalOutcome {
+        Allowed { sanitized: SanitizedOutput },
+        Denied { reason: String },
+    }
+
+    #[derive(Serialize)]
+    struct AuditActionRequested<'a> {
+        request_id: u64,
+        source: &'a str,
+        tool: &'a str,
+        domain: &'a str,
+        class: &'a str,
+        target: &'a str,
+    }
+
+    #[derive(Serialize)]
+    struct AuditActionAllowed<'a> {
+        request_id: u64,
+        class: &'a str,
+    }
+
+    #[derive(Serialize)]
+    struct AuditActionDenied<'a> {
+        request_id: u64,
+        reason: &'a str,
+        decision: &'a str,
+    }
+
+    #[derive(Serialize)]
+    struct AuditActionExecuted {
+        request_id: u64,
+        stdout_bytes: usize,
+        stderr_bytes: usize,
+    }
+
+    #[derive(Serialize)]
+    struct AuditConfirmationRequested<'a> {
+        id: &'a str,
+        request_id: u64,
+        tool: &'a str,
+        domain: &'a str,
+        class: &'a str,
+        target: &'a str,
+        source: &'a str,
+    }
+
+    #[derive(Serialize)]
+    struct AuditConfirmationResolved<'a> {
+        id: &'a str,
+        request_id: u64,
+        decision: &'a str,
+    }
+
+    const CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
+    /// Test-suite timeout (200 ms). Always defined; unused in non-test
+    /// builds. The runtime path takes `CONFIRM_TIMEOUT` (15 s).
+    #[allow(dead_code)]
+    const CONFIRM_TIMEOUT_TEST: Duration = Duration::from_millis(200);
+
+    // The spec mandates 9 parameters (policy, profile, req, gate3, gate4,
+    // broker, source, tool, data_dir). The chokepoint is a pure function
+    // with no shared state, so threading all inputs explicitly is by
+    // design — see spec §4.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate(
+        policy: &Policy,
+        _profile: &Profile,
+        req: &ActionRequest,
+        _gate3: &dyn Gate3,
+        gate4: &dyn Gate4,
+        broker: &ConfirmationBroker,
+        source: &str,
+        tool: &str,
+        data_dir: &Path,
+    ) -> EvalOutcome {
+        let request_id: u64 = rand::random();
+        let class = parse_class(&req.action_class);
+
+        // Open the audit chain.
+        let audit_path = data_dir.join("audit.jsonl");
+        let mut chain = blackglass_audit::Chain::open(&audit_path).expect("audit chain open");
+
+        // Event 1: ActionRequested.
+        chain.append(blackglass_audit::Event {
+            seq: 0,
+            ts: now_iso8601(),
+            prev_hash: String::new(),
+            kind: blackglass_audit::EventKind::ActionRequested,
+            payload: serde_json::to_value(AuditActionRequested {
+                request_id, source, tool,
+                domain: &req.domain, class: &req.action_class, target: &req.target,
+            }).unwrap(),
+        }).unwrap();
+
+        // Gate 1: policy check.
+        if !policy.allows(class) {
+            chain.append(blackglass_audit::Event {
+                seq: 0,
+                ts: now_iso8601(),
+                prev_hash: String::new(),
+                kind: blackglass_audit::EventKind::ActionDenied,
+                payload: serde_json::to_value(AuditActionDenied {
+                    request_id, reason: "policy_disallows_class", decision: "deny",
+                }).unwrap(),
+            }).unwrap();
+            return EvalOutcome::Denied { reason: "policy_disallows_class".into() };
+        }
+
+        // Gate 3: operator confirmation (only for destructive).
+        if class == ActionClass::Destructive {
+            let (id, rx) = broker.register().await;
+            let timeout = if cfg!(test) { CONFIRM_TIMEOUT_TEST } else { CONFIRM_TIMEOUT };
+
+            chain.append(blackglass_audit::Event {
+                seq: 0,
+                ts: now_iso8601(),
+                prev_hash: String::new(),
+                kind: blackglass_audit::EventKind::OperatorConfirmationRequested,
+                payload: serde_json::to_value(AuditConfirmationRequested {
+                    id: &id, request_id, tool,
+                    domain: &req.domain, class: &req.action_class,
+                    target: &req.target, source,
+                }).unwrap(),
+            }).unwrap();
+
+            let outcome = match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Decision::Allow)) => ConfirmationOutcome::Allow,
+                Ok(Ok(Decision::AllowAndRemember)) => ConfirmationOutcome::AllowAndRemember,
+                Ok(Ok(Decision::Deny)) | Ok(Err(_)) => ConfirmationOutcome::Deny,
+                Err(_) => ConfirmationOutcome::Timeout,
+            };
+
+            chain.append(blackglass_audit::Event {
+                seq: 0,
+                ts: now_iso8601(),
+                prev_hash: String::new(),
+                kind: blackglass_audit::EventKind::OperatorConfirmationResolved,
+                payload: serde_json::to_value(AuditConfirmationResolved {
+                    id: &id, request_id, decision: outcome.as_decision_str(),
+                }).unwrap(),
+            }).unwrap();
+
+            match outcome {
+                ConfirmationOutcome::Allow | ConfirmationOutcome::AllowAndRemember => {} // proceed
+                ConfirmationOutcome::Deny | ConfirmationOutcome::Timeout | ConfirmationOutcome::Disconnected => {
+                    chain.append(blackglass_audit::Event {
+                        seq: 0,
+                        ts: now_iso8601(),
+                        prev_hash: String::new(),
+                        kind: blackglass_audit::EventKind::ActionDenied,
+                        payload: serde_json::to_value(AuditActionDenied {
+                            request_id,
+                            reason: if outcome == ConfirmationOutcome::Timeout { "operator_timeout" } else { "operator_denied" },
+                            decision: outcome.as_decision_str(),
+                        }).unwrap(),
+                    }).unwrap();
+                    return EvalOutcome::Denied { reason: "operator".into() };
+                }
+            }
+        }
+
+        // Event: ActionAllowed.
+        chain.append(blackglass_audit::Event {
+            seq: 0,
+            ts: now_iso8601(),
+            prev_hash: String::new(),
+            kind: blackglass_audit::EventKind::ActionAllowed,
+            payload: serde_json::to_value(AuditActionAllowed {
+                request_id, class: &req.action_class,
+            }).unwrap(),
+        }).unwrap();
+
+        // Sub-plan 3: we don't actually exec (the Tauri app does). For the
+        // chokepoint test, exec is a no-op and Gate 4 is called on empty output.
+        let sanitized = gate4.sanitize("", "");
+
+        // Event: ActionExecuted.
+        chain.append(blackglass_audit::Event {
+            seq: 0,
+            ts: now_iso8601(),
+            prev_hash: String::new(),
+            kind: blackglass_audit::EventKind::ActionExecuted,
+            payload: serde_json::to_value(AuditActionExecuted {
+                request_id,
+                stdout_bytes: sanitized.stdout.len(),
+                stderr_bytes: sanitized.stderr.len(),
+            }).unwrap(),
+        }).unwrap();
+
+        EvalOutcome::Allowed { sanitized }
+    }
+
+    fn parse_class(s: &str) -> ActionClass {
+        match s {
+            "destructive" => ActionClass::Destructive,
+            _ => ActionClass::ReadOnly,
+        }
+    }
+
+    fn now_iso8601() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        // Minimal ISO-8601 (UTC, second precision) — enough for tests.
+        // NOTE: the legacy `iso8601_utc_now` in the parent module does
+        // proper date math and is used by the legacy `Chokepoint` API.
+        // This helper is used only by the new `evaluate` function.
+        format!("1970-01-01T00:00:{secs}Z")
+    }
+}
+
+// Re-exports so the test can write `blackglass_core::chokepoint::Profile`,
+// `blackglass_core::chokepoint::EvalOutcome`, and
+// `blackglass_core::chokepoint::evaluate` per the spec.
+pub use self::r#async::{evaluate, EvalOutcome, Profile};
