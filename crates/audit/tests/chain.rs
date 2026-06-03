@@ -136,3 +136,29 @@ fn operator_confirmation_events_round_trip() {
     }).unwrap();
     assert_eq!(Chain::verify(&p).unwrap(), 2);
 }
+
+#[test]
+fn chain_hash_includes_new_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("audit.jsonl");
+    let mut chain = Chain::open(&p).unwrap();
+    for (i, kind) in [
+        EventKind::ActionRequested,
+        EventKind::OperatorConfirmationRequested,
+        EventKind::OperatorConfirmationResolved,
+        EventKind::ActionAllowed,
+    ].iter().enumerate() {
+        chain.append(Event {
+            seq: (i + 1) as u64,
+            ts: format!("2026-06-03T00:00:0{i}Z"),
+            prev_hash: String::new(),
+            kind: kind.clone(),
+            payload: serde_json::json!({ "i": i }),
+        }).unwrap();
+    }
+    // Tamper with the third event and expect verify to fail.
+    let mut content = std::fs::read_to_string(&p).unwrap();
+    content = content.replace("\"i\":2", "\"i\":99");
+    std::fs::write(&p, content).unwrap();
+    assert!(Chain::verify(&p).is_err());
+}
