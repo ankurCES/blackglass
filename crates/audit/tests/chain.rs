@@ -103,3 +103,36 @@ fn prompt_injection_suspected_round_trips() {
     }).unwrap();
     assert_eq!(Chain::verify(&p).unwrap(), 1);
 }
+
+#[test]
+fn operator_confirmation_events_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("audit.jsonl");
+    let mut chain = Chain::open(&p).unwrap();
+    chain.append(Event {
+        seq: 1,
+        ts: "2026-06-03T00:00:00Z".into(),
+        prev_hash: String::new(),
+        kind: EventKind::OperatorConfirmationRequested,
+        payload: serde_json::json!({
+            "id": "018f3b1c-7e2a-7c2e-bf3e-1c0a2b3c4d5e",
+            "request_id": 42,
+            "tool": "nmap_scan",
+            "domain": "recon",
+            "class": "destructive",
+            "target": "10.10.0.5/24",
+            "source": "ai-session-claude-opus-4",
+        }),
+    }).unwrap();
+    chain.append(Event {
+        seq: 2,
+        ts: "2026-06-03T00:00:01Z".into(),
+        prev_hash: String::new(),
+        kind: EventKind::OperatorConfirmationResolved,
+        payload: serde_json::json!({
+            "id": "018f3b1c-7e2a-7c2e-bf3e-1c0a2b3c4d5e",
+            "decision": "allow",
+        }),
+    }).unwrap();
+    assert_eq!(Chain::verify(&p).unwrap(), 2);
+}

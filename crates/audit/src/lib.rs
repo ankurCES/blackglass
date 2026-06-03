@@ -39,6 +39,8 @@ pub enum EventKind {
     ActionFailed,
     AuditExported,
     PromptInjectionSuspected,
+    OperatorConfirmationRequested,
+    OperatorConfirmationResolved,
     #[serde(other)]
     Other,
 }
