@@ -1,5 +1,6 @@
 use anyhow::Result;
 use blackglass_audit::Chain;
+use blackglass_core::broker::ConfirmationBroker;
 use blackglass_core::chokepoint::Chokepoint;
 use blackglass_core::gates::AllowAll;
 use blackglass_core::sanitizer::RealSanitizer;
@@ -76,6 +77,20 @@ async fn main() -> Result<()> {
                 Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone())),
             )
             .with_evidence_dir(evidence_dir);
+            // Sub-plan 3: operator socket (Tauri UI). Runs concurrently with
+            // the runtime socket accept loop below.
+            let data_dir = socket
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let broker = ConfirmationBroker::new();
+            let operator_sock = data_dir.join("operator.sock");
+            let op_broker = broker.clone();
+            tokio::spawn(async move {
+                if let Err(e) = blackglass_core::operator_server::run(&operator_sock, op_broker).await {
+                    eprintln!("operator socket error: {e}");
+                }
+            });
             let server = Server::bind(&socket, token, cp).await?;
             server.serve().await?;
         }
