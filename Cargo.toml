@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/audit",
+    "crates/profile",
+    "crates/engagement",
+    "crates/ipc",
+    "crates/core",
+    "crates/cli",
+    "crates/runtime",
+    "crates/mcp-osint",
+    "crates/mcp-packets",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+blake3 = "1"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time", "fs"] }
+rand = "0.8"
+hex = "0.4"
+ipnetwork = "0.20"
+tempfile = "3"
+proptest = "1"
+assert_cmd = "2"
+predicates = "3"
+regex = "1"
+# rmcp 1.7.0 — verified 2026-06-03 via `cargo search rmcp`
+rmcp = { version = "1", features = ["server", "transport-io"] }
+
+# (root package: no code at the repo root; this is a Cargo workspace only)

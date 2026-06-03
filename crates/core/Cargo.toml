@@ -1,0 +1,32 @@
+[package]
+name = "blackglass-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "blackglass-core"
+path = "src/main.rs"
+
+[dependencies]
+blackglass-audit = { path = "../audit" }
+blackglass-profile = { path = "../profile" }
+blackglass-engagement = { path = "../engagement" }
+blackglass-ipc = { path = "../ipc" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+hex.workspace = true
+regex.workspace = true
+sha2.workspace = true
+clap = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true

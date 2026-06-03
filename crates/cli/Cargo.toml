@@ -1,0 +1,27 @@
+[package]
+name = "blackglass-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "blackglass"
+path = "src/main.rs"
+
+[dependencies]
+blackglass-audit = { path = "../audit" }
+blackglass-ipc = { path = "../ipc" }
+clap = { workspace = true, features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
+blackglass-audit = { path = "../audit" }
