@@ -110,7 +110,7 @@ dialect" still holds — same dialect, just over two transports. (See ADR
 | `crates/core/src/chokepoint.rs` | CHANGED | `execute_action` is now `async`. After Gate 2, if `req.action_class == "destructive"`, awaits `gate3.confirm(req).await`; otherwise auto-allows. Maps the outcome to an audit event. |
 | `crates/core/src/main.rs` | CHANGED | Adds `--operator-socket` flag. Default path: `~/.local/share/blackglass/operator.sock`. |
 | `crates/audit/src/lib.rs` (where `EventKind` lives) | CHANGED | Adds `OperatorConfirmationRequested` and `OperatorConfirmationResolved` event kinds. The latter carries `decision`. |
-| `crates/profile/src/lib.rs` | CHANGED | Documents `destructive` as a recognized action-class value. (No struct change — the schema is already `Vec<String>`.) |
+| `crates/profile/src/lib.rs` | CHANGED | Documents `destructive` as a recognized action-class value. (No struct change — the schema is already `Vec<String>`.) The analyst default profile is unchanged: it still lists only `read_only`. Tests that exercise the destructive path set the profile to one that includes `destructive`. |
 | `crates/runtime/src/gate_client.rs` | CHANGED | The `execute_action` method becomes `async` (it already returns a future, but its callers in MCP server crates will need `await` updates). |
 | `Cargo.toml` (workspace) | CHANGED | Adds `crates/ui` to `members`. |
 | `docs/decisions/0007-0012*.md` | NEW | The 6 ADRs listed in §10. |
@@ -198,7 +198,7 @@ confirmations matching that connection and cancels them with reason
     "name": "analyst",
     "tier": "analyst",
     "allowed_domains": ["core", "osint", "packets", "audit"],
-    "allowed_action_classes": ["read_only", "destructive"]
+    "allowed_action_classes": ["read_only"]
   },
   "engagement": {
     "id": "default",
@@ -215,7 +215,14 @@ confirmations matching that connection and cancels them with reason
 }
 ```
 
-`confirm.request` (server-pushed event on operator socket):
+`confirm.request` is a **server-pushed event** (not a JSON-RPC request
+— it has no `method` field and expects no response). The Tauri-app side
+of the operator socket receives it via a push channel; `confirm.resolve`
+is a separate JSON-RPC call the Tauri app issues in response. This
+distinction matters for the implementation: the Tauri Rust side must
+distinguish "incoming event" from "incoming RPC" on the same socket.
+
+`confirm.request` payload (server-pushed event):
 ```json
 {
   "id": "018f3b1c-7e2a-7c2e-bf3e-1c0a2b3c4d5e",
@@ -380,6 +387,17 @@ The `request` method:
    the disconnect handler cancels the oneshot with `Disconnected` and we
    return that.
 
+**Note on `deny_late`.** A late `confirm.resolve` (Tauri app sends
+`decision: "deny"` after the timeout has already fired) is handled
+specially: the chokepoint's `.await` has already resolved with
+`ConfirmationOutcome::Timeout`, the audit chain already has
+`OperatorConfirmationResolved{decision: "timeout"}` and `ActionDenied`.
+The late `confirm.resolve` triggers a second `OperatorConfirmationResolved`
+event with `decision: "deny_late"` — but the chokepoint does **not**
+re-resolve its `.await` (it's already past that point) and does **not**
+emit a second `ActionDenied`. The "late" path is implemented at the
+operator-socket-handler layer, not the chokepoint layer.
+
 ### 6.3 Action-class mapping
 
 | `ActionRequest.action_class` | Gate 3 behavior |
@@ -409,7 +427,7 @@ pub enum EventKind {
 
 ```json
 {
-  "confirmation_id": "uuid",
+  "id": "uuid",
   "request_id": 42,
   "tool": "nmap_scan",
   "domain": "recon",
@@ -423,10 +441,13 @@ pub enum EventKind {
 
 ```json
 {
-  "confirmation_id": "uuid",
+  "id": "uuid",
   "decision": "allow | allow_and_remember | deny | timeout | disconnected | deny_late"
 }
 ```
+
+(Using `id` rather than `confirmation_id` keeps the audit-event payload
+and the wire payload in lockstep — same field, same value, same type.)
 
 The 6 `decision` values are kept distinct because the prompt-injection
 review page (3ε, deferred) will want to surface "operator clicked Deny"
@@ -469,8 +490,12 @@ table is real work for a later sub-plan.
 
 - `OperatorConfirmationRequested` is emitted **before** the chokepoint `.await`s.
 - `OperatorConfirmationResolved` is emitted **immediately** after the `.await` resolves.
-- For denied outcomes (timeout, disconnected, deny button, deny_late),
+- For denied outcomes triggered by the chokepoint (timeout, disconnected, deny button),
   `ActionDenied` follows `OperatorConfirmationResolved` in the chain.
+- `deny_late` is a **late** response from the Tauri app to an already-resolved
+  confirmation. The chokepoint has already emitted `ActionDenied` (for the
+  timeout case) — emitting a second one would double-count. So `deny_late`
+  is logged as `OperatorConfirmationResolved` only; no `ActionDenied` follows.
 - For allowed outcomes, `ActionAllowed` follows `OperatorConfirmationResolved`,
   and `ActionExecuted` follows `ActionAllowed`.
 - For `read_only` actions, the chain is unchanged from sub-plan 1:
