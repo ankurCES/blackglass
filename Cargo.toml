@@ -10,6 +10,7 @@ members = [
     "crates/runtime",
     "crates/mcp-osint",
     "crates/mcp-packets",
+    "crates/python-bridge",
     "app/src-tauri",
 ]
 
@@ -34,6 +35,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 rand = "0.8"
 hex = "0.4"
 ipnetwork = "0.20"
+async-trait = "0.1"
 tempfile = "3"
 proptest = "1"
 assert_cmd = "2"
