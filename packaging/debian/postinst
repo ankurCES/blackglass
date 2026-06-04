@@ -23,9 +23,14 @@ install -d -m 0750 -o root -g blackglass /var/lib/blackglass/evidence/python-err
 install -d -m 0750 -o root -g blackglass /var/lib/blackglass/reports
 install -d -m 0755 /var/run/blackglass
 
-# 4. Install AppArmor profiles
-for f in /etc/apparmor.d/blackglass-core /etc/apparmor.d/blackglass-polkit-helper; do
+# 4. Install AppArmor profiles.
+#    For upgrades from the v0 root-systemd profile, unload the
+#    old profile first so the new user-systemd profile can attach.
+#    (Same profile name; apparmor_parser -r replaces, but we -R
+#    defensively in case a future revision renames the profile.)
+for f in /etc/apparmor.d/blackglass-core; do
     if [ -f "$f" ]; then
+        apparmor_parser -R "$f" 2>/dev/null || true
         apparmor_parser -r "$f" || {
             echo "Failed to load $f. Refusing to continue." >&2
             exit 1

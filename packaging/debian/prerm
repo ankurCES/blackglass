@@ -4,7 +4,6 @@ set -e
 # 1. Unload AppArmor profiles
 if command -v apparmor_parser >/dev/null; then
     apparmor_parser -R /etc/apparmor.d/blackglass-core || true
-    apparmor_parser -R /etc/apparmor.d/blackglass-polkit-helper || true
 fi
 
 # 2. debconf prompt for engagement data removal
