@@ -1,0 +1,77 @@
+Source: blackglass
+Section: net
+Priority: optional
+Maintainer: Blackglass <security@blackglass.dev>
+Build-Depends:
+ debhelper-compat (= 13),
+ cargo (>= 1.83),
+ rustc (>= 1.83),
+ libwebkit2gtk-6.0-dev,
+ libgtk-3-dev,
+ libayatana-appindicator3-dev,
+ librsvg2-dev,
+ libudev-dev,
+ libdbus-1-dev,
+ libpolkit-gobject-1-dev,
+ python3 (>= 3.12),
+ python3-dev,
+ pkg-config,
+ desktop-file-utils,
+ appstream-util,
+ cosign,
+ uv,
+ cargo-deb,
+Standards-Version: 4.6.2
+Homepage: https://blackglass.dev
+Rules-Requires-Root: no
+
+Package: blackglass-minimal
+Architecture: amd64
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ libpolkit-gobject-1-0,
+ adduser,
+ policykit-1 | polkit,
+ dbus,
+ python3 (>= 3.12),
+ uv,
+ apparmor (>= 3.0),
+ apparmor-utils,
+Description: Blackglass analyst-mode security platform (no upstream tools)
+ The blackglass security chokepoint, audit log, Tauri UI, and Python sidecar.
+ Does NOT include any of the upstream pentest tool binaries. Install
+ blackglass-full or a custom selection instead.
+
+Package: blackglass-core
+Architecture: amd64
+Depends:
+ blackglass-minimal (= ${binary:Version}),
+ ${misc:Depends},
+ nmap,
+ tshark,
+ whois,
+ dnsutils,
+Description: Blackglass with the 4 tools mcp-{osint,packets} wrap
+ Adds the four upstream binaries the existing mcp-* crates depend on.
+ This is enough to run osint-whois, osint-dig, packets-tshark_read,
+ packets-tshark_capture, packets-pcap_export, and packets-scapy_craft
+ (the sidecar). Does NOT include the full 27-tool ecosystem.
+
+Package: blackglass-full
+Architecture: amd64
+Depends:
+ blackglass-core (= ${binary:Version}),
+ ${misc:Depends},
+ hashcat, john, hydra, nikto, sqlmap,
+ netexec, impacket-scripts, evil-winrm, responder,
+ nuclei, subfinder, httpx, ffuf, whatweb, feroxbuster, theharvester,
+ exploitdb, metasploit-framework, gophish,
+ aircrack-ng, hcxdumptool, bettercap, cewl,
+Recommends: cosign
+Conflicts: blackglass-minimal, blackglass-core
+Description: Blackglass with all 27 upstream pentest tools (the full ecosystem)
+ This is the canonical install for a clean Ubuntu 24.04 / Kali machine.
+ Installs everything the spec's §7.2 Recommends list mentions. ~3 GB on disk.
+ Most installs should use this. Use blackglass-minimal or blackglass-core
+ if you want to cherry-pick which upstream tools are present.
