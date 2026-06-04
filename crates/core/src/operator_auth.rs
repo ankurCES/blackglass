@@ -63,7 +63,7 @@ impl OperatorAuth {
         }
         let meta = fs::metadata(&self.token_path)?;
         let mode = meta.permissions().mode() & 0o777;
-        if mode != REQUIRED_MODE {
+        if mode & 0o077 != 0 {
             return Err(AuthError::TokenFileBadMode(self.token_path.clone(), mode));
         }
         let expected = fs::read_to_string(&self.token_path)?;
