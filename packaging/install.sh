@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — blackglass one-line installer.
-# Source: https://github.com/blackglass/blackglass/blob/main/packaging/install.sh
+# Source: https://raw.githubusercontent.com/ankurCES/blackglass/master/packaging/install.sh
 # This script is browsable. Auditing it is the point.
 
 set -euo pipefail
@@ -55,9 +55,9 @@ echo "✓ cosign is available"
 
 # 4. Fetch the latest release metadata
 echo "Fetching latest release info..."
-release_json=$(curl -sSfL https://api.github.com/repos/blackglass/blackglass/releases/latest)
+release_json=$(curl -sSfL https://api.github.com/repos/ankurCES/blackglass/releases/latest)
 version=$(echo "$release_json" | jq -r .tag_name)
-asset_base="https://github.com/blackglass/blackglass/releases/download/$version"
+asset_base="https://github.com/ankurCES/blackglass/releases/download/$version"
 
 # 5. Download the .deb and its signature
 tmpdir=$(mktemp -d)
@@ -86,6 +86,6 @@ blackglass ${version} installed.
   UI:           blackglass ui
   Profile:      blackglass profile init
   Audit log:    ~/.local/share/blackglass/audit/audit.jsonl
-  Re-install:   curl -sSfL https://blackglass.dev/install.sh | sudo bash
+  Re-install:   curl -sSfL https://raw.githubusercontent.com/ankurCES/blackglass/master/packaging/install.sh | sudo bash -s -- --full
 You may need to log out and back in for the 'blackglass' group to take effect.
 EOF

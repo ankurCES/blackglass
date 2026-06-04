@@ -11,7 +11,7 @@ confinement + polkit privilege drop + udev rules for the Flipper.
 
 ```bash
 # 1. Install (Ubuntu 24.04, Kali, Debian 12+)
-curl -sSfL https://blackglass.dev/install.sh | sudo bash
+curl -sSfL https://raw.githubusercontent.com/ankurCES/blackglass/master/packaging/install.sh | sudo bash -s -- --full
 
 # 2. Initialize your first profile
 blackglass profile init
@@ -22,6 +22,13 @@ blackglass ui
 
 That's it. The audit log is at `~/.local/share/blackglass/audit/audit.jsonl`.
 
+> **Note:** the `curl | sudo bash` pattern is by design — the installer is
+> a 100-line bash file that lives in the repo (`packaging/install.sh`)
+> and is browsable on GitHub before you run it. It downloads the cosign
+> binary, fetches the release metadata, verifies the .deb with cosign
+> keyless signing, and then hands off to apt. There is no `--insecure`
+> flag; the install refuses to proceed if cosign verification fails.
+
 ## Status
 
 | Sub-plan | Status | What it ships |
@@ -29,29 +36,31 @@ That's it. The audit log is at `~/.local/share/blackglass/audit/audit.jsonl`.
 | 1 — spine | ✅ complete | cargo workspace, `blackglass-{audit,profile,engagement,ipc,core,cli,runtime}`, 4-gate chokepoint, hash-chained audit, JSON-RPC over Unix socket, CLI |
 | 2 — Gate 4 + mcp-{osint,packets} | ✅ complete | prompt-injection sanitizer wired into the chokepoint, `osint-{whois,dig}`, `packets-{tshark_read,tshark_capture,pcap_export,scapy_craft_stub}` |
 | 3 — Gate 3 + operator server | ✅ complete | operator confirmation chokepoint wired end-to-end; 66 tests passing |
-| 4 — desktop + sidecar + .deb | ✅ complete | Tauri UI foundation, Python sidecar scaffold, AppArmor profiles, polkit helper, cosign-signed .deb pipeline, 90 tests passing |
+| 4 — desktop + sidecar + .deb | ✅ complete | Tauri UI foundation, 4 new MCP server crates (`mcp-ad`, `mcp-flipper`, `mcp-phish`, `mcp-detect`), Python sidecar with scapy/impacket/hardware/detect bridges, deepfake secondary sidecar (FastAPI placeholder), AppArmor profiles, polkit helper, cosign-signed .deb pipeline, 134 tests passing |
 
 ## Architecture
 
 ```
-┌────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│  mcp-{osint,   │    │  blackglass-core │    │  Python sidecar  │
-│   packets,...} ├───►│  (Rust, the gate)├────►│  (scapy,         │
-│  6 thin clients│    │                  │    │   impacket)      │
-└────────────────┘    └──────────────────┘    └──────────────────┘
-        │                       │                      │
-        │                       ▼                      │
-        │              ┌──────────────────┐            │
-        │              │  audit chain     │            │
-        │              │  (JSONL+blake3)  │            │
-        │              └──────────────────┘            │
-        │                       │                      │
-        │                       ▼                      │
-        │              ┌──────────────────┐            │
-        │              │  Tauri UI        │            │
-        │              │  (audit browser) │            │
-        │              └──────────────────┘            │
-        │                                              │
+┌────────────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│  mcp-{osint,packets,   │    │  blackglass-core │    │  Python sidecar  │
+│   ad,flipper,phish,    ├───►│  (Rust, the gate)├────►│  (scapy, impacket│
+│   detect}              │    │                  │    │   pyflipper,     │
+│  6 thin MCP clients    │    │                  │    │   gophish,       │
+└────────────────────────┘    └──────────────────┘    │   detect_bridge) │
+        │                       │                      └────────┬─────────┘
+        │                       │                               │ loopback HTTP
+        │                       │                               ▼
+        │              ┌──────────────────┐         ┌──────────────────┐
+        │              │  audit chain     │         │  secondary side- │
+        │              │  (JSONL+blake3)  │         │  car (FastAPI    │
+        │              └──────────────────┘         │   placeholder)   │
+        │                       │                  └──────────────────┘
+        │                       ▼
+        │              ┌──────────────────┐
+        │              │  Tauri UI        │
+        │              │  (audit browser) │
+        │              └──────────────────┘
+        │
         └──────────────► nmap, tshark, ... ◄───────────┘
                         (upstream tool binaries)
 ```
@@ -97,17 +106,25 @@ crates/
   cli/                  # init | ping | audit-verify
   runtime/              # GateClient — async auth + execute_action over Unix socket
   mcp-osint/            # osint-whois, osint-dig
-  mcp-packets/          # tshark_read, tshark_capture, pcap_export, scapy_craft_stub
-  python-bridge/        # pyo3-gated trait for scapy/impacket/pyflipper calls
+  mcp-packets/          # tshark_read, tshark_capture, pcap_export, scapy_craft
+  mcp-ad/               # 5 ad-* tools (impacket psexec/wmiexec/secretsdump/kerberoast/asreproast)
+  mcp-flipper/          # flipper-{list,read,write,run}
+  mcp-phish/            # phish-* (evilginx2 + gophish)
+  mcp-detect/           # detect-{image,video,batch} (routes to secondary sidecar)
+  python-bridge/        # pyo3-gated trait + stub for sidecar calls
   polkit-helper/        # root-only exec shim that re-checks every polkit grant
+  secondary-sidecar/    # launcher for the FastAPI deepfake placeholder
   xtask/                # build orchestrator: build, deb, sign, verify-install, confinement-test
+python/
+  sidecar/              # blackglass_sidecar Python package (scapy, impacket, hardware, detect bridges)
+  secondary-sidecar/    # blackglass_secondary FastAPI package (deepfake placeholder)
 packaging/
   debian/               # control, rules, .desktop, postinst, prerm
-  apparmor/             # profiles for core + polkit-helper
+  apparmor/             # profiles for core + polkit-helper + sidecars
   polkit/               # com.blackglass.start-core policy
   udev/                 # 99-blackglass-flipper.rules
   cosign/               # pinned public-key for curl|sh install
-  install.sh            # one-line installer
+  install.sh            # one-line installer (100 lines, browsable)
   installer/            # detect-distro, verify-cosign, apt-install helpers
 scripts/
   smoke-test.sh         # 7-criterion install smoke test
@@ -115,12 +132,16 @@ scripts/
 
 ## Security
 
-Read `docs/security.md` for the threat model, the kill-switch list, and
-the secure-update mechanism. Read `docs/spec.md` for the full design.
+Read `docs/specs/2026-06-03-blackglass-design.md` for the full design
+(threat model, kill-switch list, secure-update mechanism, the four gates,
+the audit chain format, the IPC wire protocol). The 15 ADRs in
+`docs/decisions/` capture the per-decision rationale (cosign keyless
+signing, two-socket IPC, pyo3 GIL pattern, secondary sidecar, deb tiers,
+etc.).
 
-The install flow uses cosign keyless signing (OIDC, tied to the
-release GitHub Actions workflow). The pinned public-key fingerprint
-lives at `packaging/cosign/cosign.pub`.
+The install flow uses cosign keyless signing (OIDC, tied to the release
+GitHub Actions workflow). The pinned public-key fingerprint lives at
+`packaging/cosign/cosign.pub`.
 
 ## License
 
