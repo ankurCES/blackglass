@@ -13,13 +13,22 @@ pub fn deb(variants: &str) -> Result<()> {
     println!("=== xtask deb ({}) ===", variants);
     // First build everything
     build()?;
-    // Then build each variant
-    for variant in split_variants(variants) {
-        println!("\n--- building variant: {variant} ---");
-        // For now, all variants use the same source .deb; the
-        // variant-specific apt-deps are pulled in at install time.
-        run(Command::new("cargo").args(["deb", "--variant", &variant]))?;
-    }
+    // Then build the .deb. We currently ship a single .deb; the
+    // --variants CLI flag is accepted for forward-compat (so the
+    // README + install.sh can say `full`) but a real multi-variant
+    // build (minimal/core/full) is post-v0.1 scope.
+    //
+    // The actual cargo-deb invocation is `-p blackglass-core` because
+    // the [package.metadata.deb] block lives in that crate. `--no-build`
+    // because `build()` above just produced target/release/* binaries.
+    let _ = split_variants(variants); // validates the input shape
+    println!("\n--- building blackglass-core .deb ---");
+    run(Command::new("cargo").args([
+        "deb",
+        "-p",
+        "blackglass-core",
+        "--no-build",
+    ]))?;
     Ok(())
 }
 
