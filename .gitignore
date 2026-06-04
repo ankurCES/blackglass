@@ -21,3 +21,10 @@ Cargo.lock.bak
 
 # Worktrees (isolated workspaces)
 /.worktrees/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
