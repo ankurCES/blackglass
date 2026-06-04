@@ -1,6 +1,12 @@
+pub mod audit_broadcast;
+pub mod audit_query;
 pub mod broker;
 pub mod chokepoint;
 pub mod gates;
+pub mod mcp_run_tool;
+pub mod mcp_spawn_config;
+pub mod mcp_supervisor;
+pub mod operator_auth;
 pub mod operator_server;
 pub mod policy;
 pub mod rpc;

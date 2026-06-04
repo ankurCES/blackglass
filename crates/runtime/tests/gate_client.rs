@@ -19,10 +19,12 @@ async fn gate_client_ping_succeeds_after_auth() {
     let chain = Chain::open(&audit).unwrap();
     let mut eng = Engagement::new("e", "t", "2026-06-01T00:00:00Z", "2026-06-30T00:00:00Z");
     eng.add_target(Target { value: "10.0.0.5".into(), kind: TargetKind::Ip });
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<blackglass_audit::Event>(16);
     let cp = Chokepoint::new(
         chain, Profile::analyst_default(), eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        event_tx,
     );
 
     let server = Server::bind(&sock, "tok".into(), cp).await.unwrap();
@@ -47,10 +49,12 @@ async fn gate_client_execute_action_round_trips() {
     let chain = Chain::open(&audit).unwrap();
     let mut eng = Engagement::new("e", "t", "2026-06-01T00:00:00Z", "2026-06-30T00:00:00Z");
     eng.add_target(Target { value: "10.0.0.5".into(), kind: TargetKind::Ip });
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<blackglass_audit::Event>(16);
     let cp = Chokepoint::new(
         chain, Profile::analyst_default(), eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        event_tx,
     );
 
     let server = Server::bind(&sock, "tok".into(), cp).await.unwrap();

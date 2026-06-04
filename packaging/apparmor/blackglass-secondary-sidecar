@@ -1,0 +1,48 @@
+#include <tunables/global>
+
+# blackglass-secondary-sidecar — the deepfake detector.
+#
+# Runs pytorch + MesoNet in its own venv. Listens on localhost:8511
+# via FastAPI. The blackglass-core chokepoint talks to it over
+# loopback HTTP. It must NOT have any access to operator files
+# beyond its own state directory.
+#
+# Confinement model: read its own venv, write its own log, listen
+# on localhost:8511. Nothing else.
+
+profile blackglass-secondary-sidecar flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  # Binary + its venv
+  /usr/bin/blackglass-secondary-sidecar                              mr,
+  /usr/lib/blackglass/secondary-sidecar-venv/**                      r,
+  /usr/lib/blackglass/secondary-sidecar-venv/bin/python              rix,
+
+  # Operator state (only the sidecar's own log + a small state file)
+  owner @{HOME}/.local/share/blackglass/secondary-sidecar.log        rwk,
+  owner @{HOME}/.local/share/blackglass/secondary-sidecar.state      rwk,
+
+  # Network: localhost REST endpoint (8511) — the core talks to us here
+  network inet  stream,
+  network inet6 stream,
+  network unix  stream,
+
+  # Deny
+  deny /etc/**                                  w,
+  deny /usr/**                                  w,
+  deny /boot/**                                 w,
+  deny /var/lib/blackglass/**                rwk,
+  deny /var/run/blackglass/**                rwk,
+  deny /etc/shadow                              r,
+  deny /etc/sudoers                             r,
+  deny /etc/sudoers.d/**                        r,
+  deny /root/**                              rwx,
+  deny /home/*/.ssh/**                          r,
+  deny /home/*/.local/share/blackglass/audit/** r,
+  deny /home/*/.local/share/blackglass/operator.token r,
+  deny ptrace,
+  deny mount,
+  deny pivot_root,
+}

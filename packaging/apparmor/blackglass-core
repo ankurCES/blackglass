@@ -1,43 +1,56 @@
 #include <tunables/global>
 
-# blackglass-core — the chokepoint.
-# Confinement model: the core can read user config, write the audit log
-# and engagement evidence, and use the network for upstream tool calls.
-# It cannot write to system directories or read other users' files.
+# blackglass-core — the chokepoint (user-systemd version).
+#
+# This profile confines the blackglass-core binary when run as a
+# *user* systemd service (`systemctl --user`). It does NOT use the
+# `owner` rules' implicit uid-match for /var paths because there are
+# none — operator state lives in @{HOME}/.local/share/blackglass/
+# and the running uid is the operator, not root, so `owner` rules on
+# the home directory are correct.
+#
+# Confinement model: the core can read user config, write the audit
+# log and engagement evidence, and use the network for upstream tool
+# calls. It cannot write to system directories or read other users'
+# files.
 
 profile blackglass-core flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
   #include <abstractions/openssl>
 
-  # Binaries the core itself runs
-  /usr/bin/blackglass-core              mr,
-  /usr/bin/blackglass-mcp-*             mrix,
-  /usr/bin/nmap                         mrix,
-  /usr/bin/tshark                       mrix,
-  /usr/bin/dig                          mrix,
-  /usr/bin/whois                        mrix,
-  /usr/bin/curl                         mrix,
-  /usr/bin/python3*                     mrix,
-  /usr/lib/blackglass/**                mr,
-  /usr/share/blackglass/**              mr,
+  # Core binary (and its own libraries)
+  /usr/bin/blackglass-core                       mr,
+  /usr/lib/blackglass/**                         mr,
+  /usr/share/blackglass/**                       mr,
 
-  # Config
-  /etc/blackglass/**                    r,
-  /etc/apparmor.d/blackglass-core       r,
+  # Binaries the core itself runs (MCP children + upstream tools)
+  /usr/bin/blackglass-mcp-*                      mrix,
+  /usr/bin/blackglass-secondary-sidecar          mrix,
+  /usr/bin/nmap                                  mrix,
+  /usr/bin/tshark                                mrix,
+  /usr/bin/dig                                   mrix,
+  /usr/bin/whois                                 mrix,
+  /usr/bin/curl                                  mrix,
+  /usr/bin/python3*                              mrix,
 
-  # Operator home (read + write)
-  owner @{HOME}/.local/share/blackglass/**     rwk,
-  owner @{HOME}/.config/blackglass/**         rwk,
+  # Config (system-installed)
+  /etc/blackglass/**                             r,
+  /etc/apparmor.d/blackglass-core                r,
+  /etc/apparmor.d/blackglass-secondary-sidecar   r,
 
-  # Engagement data
-  /var/lib/blackglass/**                rwk,
-  /var/lib/blackglass/evidence/**       rwk,
-  /var/lib/blackglass/evidence/python-errors/** rwk,
+  # Operator state (read+write, owned by the running user)
+  owner @{HOME}/.local/share/blackglass/**       rwk,
+  owner @{HOME}/.local/share/blackglass/runtime.sock     rw,
+  owner @{HOME}/.local/share/blackglass/operator.token   r,
+  owner @{HOME}/.local/share/blackglass/audit/**         rwk,
+  owner @{HOME}/.local/share/blackglass/logs/**          rwk,
+  owner @{HOME}/.local/share/blackglass/evidence/**      rwk,
+  owner @{HOME}/.config/blackglass/**                    r,
 
-  # Runtime state
-  /var/run/blackglass/**                rwk,
-  /var/run/blackglass/core.pid          w,
+  # Python sidecar venv
+  /usr/lib/blackglass/python-venv/**             r,
+  /usr/lib/blackglass/python-venv/bin/python     rix,
 
   # Network
   network inet  stream,
@@ -45,14 +58,24 @@ profile blackglass-core flags=(attach_disconnected,mediate_deleted) {
   network unix  stream,
   network netlink raw,
 
-  # Deny all writes to system paths
-  deny /etc/**                         w,
-  deny /usr/**                         w,
-  deny /boot/**                        w,
-  deny /home/*/.ssh/**                 r,
+  # Deny all writes to system paths + sensitive reads
+  deny /etc/**                                    w,
+  deny /usr/**                                    w,
+  deny /boot/**                                   w,
+  deny /var/lib/blackglass/**                  rwk,
+  deny /var/run/blackglass/**                  rwk,
+  deny /etc/shadow                                r,
+  deny /etc/sudoers                               r,
+  deny /etc/sudoers.d/**                          r,
+  deny /root/**                                rwx,
+  deny /home/*/.ssh/**                            r,
   deny ptrace,
   deny mount,
-
-  # Subprocesses inherit this profile — already covered by 'i' in mrix
-  # flags on each binary entry above. No standalone rule needed.
+  deny pivot_root,
 }
+
+# A hat for the python sidecar invocation. Inherits the core's
+# profile; the mrix flag on /usr/bin/python3* + /usr/lib/blackglass/
+# python-venv/bin/python already covers it. This comment is here so
+# future readers know the python child is intentionally inside the
+# same confinement domain.

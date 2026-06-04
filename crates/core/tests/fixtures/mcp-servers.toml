@@ -1,0 +1,30 @@
+# Test fixture for the McpSpawnConfig loader. Mirrors the example shipped
+# in `/etc/blackglass/mcp-servers.toml.example`.
+
+[[servers]]
+name = "mcp-ad"
+command = "/usr/bin/blackglass-mcp-ad"
+args = []
+startup_timeout_ms = 30000
+max_restarts = 5
+
+[[servers]]
+name = "mcp-flipper"
+command = "/usr/bin/blackglass-mcp-flipper"
+args = []
+startup_timeout_ms = 30000
+max_restarts = 5
+
+[[servers]]
+name = "mcp-phish"
+command = "/usr/bin/blackglass-mcp-phish"
+args = []
+startup_timeout_ms = 30000
+max_restarts = 5
+
+[[servers]]
+name = "mcp-detect"
+command = "/usr/bin/blackglass-mcp-detect"
+args = []
+startup_timeout_ms = 30000
+max_restarts = 5

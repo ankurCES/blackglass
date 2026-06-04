@@ -5,7 +5,7 @@ copyright = "2024-2026, Blackglass"
 license-file = ["../../LICENSE"]
 section = "net"
 priority = "optional"
-depends = "$auto, libpolkit-gobject-1-0, adduser, policykit-1 | polkit, dbus, python3 (>= 3.12), uv, apparmor (>= 3.0), apparmor-utils"
+depends = "$auto, dbus, python3 (>= 3.12), uv, apparmor (>= 3.0), apparmor-utils"
 extended-description = """\
 Blackglass is a local-first, audit-logged security tool platform.
 This is the minimal package; install blackglass-core or blackglass-full
@@ -13,7 +13,7 @@ for the upstream tool ecosystem."""
 assets = [
   ["../../target/release/blackglass", "usr/bin/", "755"],
   ["../../target/release/blackglass-core", "usr/bin/", "755"],
-  ["../../target/release/blackglass-polkit-helper", "usr/libexec/", "755"],
+  ["../../target/release/blackglass-secondary-sidecar", "usr/bin/", "755"],
   ["../../target/release/blackglass-mcp-osint", "usr/bin/", "755"],
   ["../../target/release/blackglass-mcp-packets", "usr/bin/", "755"],
   ["../../target/release/blackglass-mcp-ad", "usr/bin/", "755"],
@@ -23,12 +23,17 @@ assets = [
   ["../../app/dist", "usr/lib/blackglass/blackglass-ui/", "755"],
   ["../../python/sidecar/src/blackglass_sidecar", "usr/share/blackglass/python/sidecar/src/blackglass_sidecar/", "755"],
   ["../../python/sidecar/pyproject.toml", "usr/share/blackglass/python/sidecar/", "755"],
-  ["../../packaging/debian/blackglass-core.apparmor", "etc/apparmor.d/", "644"],
-  ["../../packaging/debian/blackglass-polkit-helper.apparmor", "etc/apparmor.d/", "644"],
-  ["../../packaging/debian/com.blackglass.policy", "usr/share/polkit-1/actions/", "644"],
-  ["../../packaging/debian/99-blackglass-flipper.rules", "lib/udev/rules.d/", "644"],
+  # User-systemd unit files (installed; the postinst symlinks them
+  # into the operator's ~/.config/systemd/user/ on first launch).
+  ["../../packaging/systemd/blackglass-core.service", "usr/lib/blackglass/systemd/user/", "644"],
+  ["../../packaging/systemd/blackglass-secondary-sidecar.service", "usr/lib/blackglass/systemd/user/", "644"],
+  # AppArmor profiles
+  ["../../packaging/apparmor/blackglass-core", "etc/apparmor.d/", "644"],
+  ["../../packaging/apparmor/blackglass-secondary-sidecar", "etc/apparmor.d/", "644"],
+  # Example MCP server spawn config
+  ["../../packaging/mcp-servers.toml.example", "etc/blackglass/", "644"],
+  ["../../packaging/udev/99-blackglass-flipper.rules", "lib/udev/rules.d/", "644"],
   ["../../packaging/debian/blackglass.desktop", "usr/share/applications/", "644"],
-  ["../../packaging/cosign/cosign.pub", "usr/share/blackglass/cosign.pub", "644"],
 ]
 
 [package.metadata.deb]

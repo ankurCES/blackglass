@@ -26,17 +26,38 @@ use blackglass_audit::Chain;
 use blackglass_core::broker::ConfirmationBroker;
 use blackglass_core::chokepoint::Chokepoint;
 use blackglass_core::gates::{BrokerGate3, Gate3, Gate4};
+use blackglass_core::mcp_spawn_config::McpSpawnConfig;
+use blackglass_core::mcp_supervisor::McpSupervisor;
 use blackglass_core::operator_server::{run as run_operator, ConfirmChannel};
 use blackglass_core::sanitizer::RealSanitizer;
 use blackglass_core::server::Server;
 use blackglass_engagement::{Engagement, Target, TargetKind};
 use blackglass_ipc::encode_frame;
 use blackglass_profile::Profile;
+use serde_json::json;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+
+/// Auth token used by every test in this file. The test writes it
+/// to `<dir>/operator.token` (mode 0600) before starting the
+/// operator server; the operator client then sends it as the
+/// `auth` method's `params.token` (Task 2.5.7).
+const TEST_TOKEN: &str = "operator-test-token-gate3";
+
+fn write_token_file(dir: &tempfile::TempDir) -> PathBuf {
+    let path = dir.path().join("operator.token");
+    std::fs::write(&path, format!("{TEST_TOKEN}\n")).unwrap();
+    std::fs::set_permissions(
+        &path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    path
+}
 
 #[tokio::test]
 async fn destructive_action_requires_operator_allow() {
@@ -79,7 +100,7 @@ async fn destructive_action_requires_operator_allow() {
     // Sanitizer: not exercised meaningfully here (no real output), but
     // must exist as a Gate 4 to satisfy Chokepoint::new.
     let gate4: Arc<dyn Gate4> = Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone()));
-    let cp = Chokepoint::new(chain, profile, eng, gate3, gate4).with_evidence_dir(evidence_dir);
+    let cp = Chokepoint::new(chain, profile, eng, gate3, gate4, tokio::sync::broadcast::channel(64).0).with_evidence_dir(evidence_dir);
     let server = Server::bind(&runtime_sock, "tok".into(), cp).await.unwrap();
 
     // --- act: start both servers in the background -----------------------
@@ -90,8 +111,44 @@ async fn destructive_action_requires_operator_allow() {
     let op_broker = broker.clone();
     let op_channel = channel.clone();
     let op_sock = operator_sock.clone();
+    let op_chain = std::sync::Arc::new(std::sync::Mutex::new(Chain::open(&audit_path).unwrap()));
+    // 2.5.5 added two args to `run_operator`: a supervisor
+    // (used by `mcp_run_tool`'s liveness pre-flight) and the
+    // runtime.sock path (the forward target). This test doesn't
+    // exercise `mcp_run_tool` — only `confirm.resolve` and the
+    // Gate-3 wiring — so an empty-config placeholder supervisor
+    // and a dummy runtime.sock path are fine.
+    let sup_dir = tempdir().unwrap();
+    let sup_log = sup_dir.path().join("supervisor.log");
+    let sup_chain = sup_dir.path().join("chain.jsonl");
+    let placeholder_sup = McpSupervisor::start_with_chain(
+        McpSpawnConfig::default(),
+        &sup_log,
+        &sup_chain,
+        tokio::sync::broadcast::channel(64).0,
+    )
+    .await
+    .expect("start placeholder supervisor");
+    let op_sup = std::sync::Arc::new(placeholder_sup);
+    let op_runtime_sock = std::path::PathBuf::from("/tmp/blackglass-not-yet-set.sock");
+    // 2.5.7: write the 0600 token file before starting the operator,
+    // and pass its path as the 7th arg to `run_operator`.
+    let op_token_path = write_token_file(&dir);
     let operator_handle = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(5), run_operator(&op_sock, op_broker, op_channel)).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_operator(
+                &op_sock,
+                op_broker,
+                op_channel,
+                op_chain,
+                op_sup,
+                op_runtime_sock,
+                op_token_path,
+                tokio::sync::broadcast::channel(64).0,
+            ),
+        )
+        .await;
     });
 
     // Wait for both sockets to come up.
@@ -103,10 +160,34 @@ async fn destructive_action_requires_operator_allow() {
         assert!(path.exists(), "socket did not appear: {}", path.display());
     }
 
-    // --- 1. Operator client connects and starts reading -------------------
+    // --- 1. Operator client connects, completes `auth`, starts reading -
     let op_client = UnixStream::connect(&operator_sock).await.unwrap();
     let (op_read, mut op_write) = op_client.into_split();
     let mut op_lines = tokio::io::BufReader::new(op_read).lines();
+
+    // Send the `auth` request and read+discard the response so the
+    // subsequent `op_lines.next_line()` call sees the `confirm.request`
+    // push (not the auth response).
+    let auth_req = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "auth",
+        "params": { "token": TEST_TOKEN },
+    });
+    let mut auth_line = auth_req.to_string();
+    auth_line.push('\n');
+    op_write.write_all(auth_line.as_bytes()).await.unwrap();
+    op_write.flush().await.unwrap();
+    let auth_resp_line = tokio::time::timeout(Duration::from_secs(2), op_lines.next_line())
+        .await
+        .expect("operator should respond to auth within 2s")
+        .expect("auth read should not error");
+    let auth_resp: serde_json::Value =
+        serde_json::from_str(auth_resp_line.as_ref().unwrap()).unwrap();
+    assert!(
+        auth_resp.get("error").is_none() || auth_resp["error"].is_null(),
+        "operator auth should succeed, got: {auth_resp}"
+    );
 
     // --- 2. Runtime client connects, authenticates, sends execute --------
     let mut rt_client = UnixStream::connect(&runtime_sock).await.unwrap();
@@ -223,7 +304,7 @@ async fn destructive_action_can_be_denied_by_operator() {
     let channel = ConfirmChannel::new();
     let gate3: Arc<dyn Gate3> = Arc::new(BrokerGate3::new(broker.clone(), channel.clone(), "osint", "smoke"));
     let gate4: Arc<dyn Gate4> = Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone()));
-    let cp = Chokepoint::new(chain, profile, eng, gate3, gate4).with_evidence_dir(evidence_dir);
+    let cp = Chokepoint::new(chain, profile, eng, gate3, gate4, tokio::sync::broadcast::channel(64).0).with_evidence_dir(evidence_dir);
     let server = Server::bind(&runtime_sock, "tok".into(), cp).await.unwrap();
 
     let server_handle = tokio::spawn(async move {
@@ -232,8 +313,43 @@ async fn destructive_action_can_be_denied_by_operator() {
     let op_broker = broker.clone();
     let op_channel = channel.clone();
     let op_sock = operator_sock.clone();
+    let op_chain = std::sync::Arc::new(std::sync::Mutex::new(Chain::open(&audit_path).unwrap()));
+    // 2.5.5 added two args to `run_operator`: a supervisor
+    // (used by `mcp_run_tool`'s liveness pre-flight) and the
+    // runtime.sock path (the forward target). This test doesn't
+    // exercise `mcp_run_tool` — only `confirm.resolve` and the
+    // Gate-3 wiring — so an empty-config placeholder supervisor
+    // and a dummy runtime.sock path are fine.
+    let sup_dir = tempdir().unwrap();
+    let sup_log = sup_dir.path().join("supervisor.log");
+    let sup_chain = sup_dir.path().join("chain.jsonl");
+    let placeholder_sup = McpSupervisor::start_with_chain(
+        McpSpawnConfig::default(),
+        &sup_log,
+        &sup_chain,
+        tokio::sync::broadcast::channel(64).0,
+    )
+    .await
+    .expect("start placeholder supervisor");
+    let op_sup = std::sync::Arc::new(placeholder_sup);
+    let op_runtime_sock = std::path::PathBuf::from("/tmp/blackglass-not-yet-set.sock");
+    // 2.5.7: write the 0600 token file and pass its path to `run_operator`.
+    let op_token_path = write_token_file(&dir);
     let operator_handle = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(5), run_operator(&op_sock, op_broker, op_channel)).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_operator(
+                &op_sock,
+                op_broker,
+                op_channel,
+                op_chain,
+                op_sup,
+                op_runtime_sock,
+                op_token_path,
+                tokio::sync::broadcast::channel(64).0,
+            ),
+        )
+        .await;
     });
 
     for path in [&runtime_sock, &operator_sock] {
@@ -246,6 +362,28 @@ async fn destructive_action_can_be_denied_by_operator() {
     let op_client = UnixStream::connect(&operator_sock).await.unwrap();
     let (op_read, mut op_write) = op_client.into_split();
     let mut op_lines = tokio::io::BufReader::new(op_read).lines();
+
+    // Send the `auth` request and read+discard the response.
+    let auth_req = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "auth",
+        "params": { "token": TEST_TOKEN },
+    });
+    let mut auth_line = auth_req.to_string();
+    auth_line.push('\n');
+    op_write.write_all(auth_line.as_bytes()).await.unwrap();
+    op_write.flush().await.unwrap();
+    let auth_resp_line = tokio::time::timeout(Duration::from_secs(2), op_lines.next_line())
+        .await
+        .expect("operator should respond to auth within 2s")
+        .expect("auth read should not error");
+    let auth_resp: serde_json::Value =
+        serde_json::from_str(auth_resp_line.as_ref().unwrap()).unwrap();
+    assert!(
+        auth_resp.get("error").is_none() || auth_resp["error"].is_null(),
+        "operator auth should succeed, got: {auth_resp}"
+    );
 
     let mut rt_client = UnixStream::connect(&runtime_sock).await.unwrap();
 

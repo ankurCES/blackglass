@@ -44,6 +44,10 @@ pub enum EventKind {
     PythonBridgeInvoked,
     PythonBridgeFailed,
     PythonBridgeEvidenceDumped,
+    McpServerSpawned { server: String, pid: u32 },
+    McpServerExited { server: String, code: i32, restart_count: u32 },
+    McpRunStarted { domain: String, target: String },
+    McpRunCompleted { domain: String, target: String, ok: bool, ms: u64 },
     #[serde(other)]
     Other,
 }
@@ -99,6 +103,9 @@ impl Chain {
     }
 
     pub fn last_hash(&self) -> Option<&str> { self.last.as_deref() }
+
+    /// Path to the on-disk chain file.
+    pub fn path(&self) -> &std::path::Path { &self.path }
 
     pub fn append(&mut self, mut event: Event) -> Result<String, AuditError> {
         if event.prev_hash.is_empty() {

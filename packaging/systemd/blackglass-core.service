@@ -1,0 +1,27 @@
+[Unit]
+Description=Blackglass core (the chokepoint)
+Documentation=man:blackglass(1)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/blackglass-core
+Restart=on-failure
+RestartSec=5s
+# Hardening — this is a user service, but we still lock down
+# anything we don't need.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+# Allow AppArmor confinement to be applied (installed by the .deb
+# at /etc/apparmor.d/blackglass-core). Systemd will set the
+# confinement label on exec.
+AppArmorProfile=blackglass-core
+# State lives under the user's ~/.local/share/blackglass/ — we
+# do NOT use StateDirectory= because that's a system-mode path
+# under /var/lib. The core writes to ~/.local/share/blackglass/
+# itself based on the operator's HOME.
+
+[Install]
+WantedBy=default.target

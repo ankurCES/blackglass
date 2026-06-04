@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
 use blackglass_app::build_confirm_resolve;
+use blackglass_app::AppState;
 
 #[derive(Clone, Serialize)]
 struct OperatorEvent {
@@ -17,7 +18,24 @@ struct OperatorEvent {
 
 #[tokio::main]
 async fn main() {
+    // Compute the operator socket path + token once, at startup, and
+    // hand them to Tauri as managed state. The 3 new Tauri commands
+    // (mcp_run_tool_cmd, mcp_list_tools_cmd, audit_event_cmd) pull
+    // them out of `State<AppState>` per-call.
+    let data_dir = data_dir().join("blackglass");
+    std::fs::create_dir_all(&data_dir).ok();
+    let operator_sock_path = data_dir.join("operator.sock");
+    let operator_token = std::fs::read_to_string(data_dir.join("operator.token"))
+        .unwrap_or_default()
+        .trim_end_matches('\n')
+        .to_string();
+    let app_state = AppState {
+        operator_sock_path,
+        operator_token,
+    };
+
     tauri::Builder::default()
+        .manage(app_state)
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -27,7 +45,13 @@ async fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![confirm_resolve])
+        .invoke_handler(tauri::generate_handler![
+            confirm_resolve,
+            blackglass_app::commands::mcp_run_tool_cmd,
+            blackglass_app::commands::mcp_list_tools_cmd,
+            blackglass_app::commands::audit_event_cmd,
+            blackglass_app::commands::audit_query_cmd,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running blackglass app");
 }
@@ -89,14 +113,16 @@ async fn confirm_resolve(
 }
 
 fn operator_sock_path() -> std::io::Result<PathBuf> {
-    let dir = match std::env::var("XDG_DATA_HOME") {
+    Ok(data_dir().join("blackglass").join("operator.sock"))
+}
+
+fn data_dir() -> PathBuf {
+    match std::env::var("XDG_DATA_HOME") {
         Ok(v) => PathBuf::from(v),
         Err(_) => PathBuf::from(
-            std::env::var("HOME")
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?,
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
         )
         .join(".local")
         .join("share"),
-    };
-    Ok(dir.join("blackglass").join("operator.sock"))
+    }
 }

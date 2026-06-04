@@ -1,0 +1,38 @@
+# Example MCP server spawn config for blackglass-core.
+#
+# Copy to ~/.config/blackglass/mcp-servers.toml and edit as needed.
+# Each [[servers]] entry spawns one MCP server as a child process.
+# The core supervises each one: restart on crash with exponential
+# backoff (1s, 2s, 4s, 8s, 16s), give up after max_restarts.
+#
+# If this file is absent, the core starts with no MCP children —
+# the operator socket and the audit log still work, but mcp_run_tool
+# will return "no such domain" until you populate the config.
+
+[[servers]]
+name = "mcp-ad"
+command = "/usr/bin/blackglass-mcp-ad"
+args = []
+startup_timeout_ms = 30000
+max_restarts = 5
+
+[[servers]]
+name = "mcp-flipper"
+command = "/usr/bin/blackglass-mcp-flipper"
+args = []
+startup_timeout_ms = 30000
+max_restarts = 5
+
+[[servers]]
+name = "mcp-phish"
+command = "/usr/bin/blackglass-mcp-phish"
+args = []
+startup_timeout_ms = 30000
+max_restarts = 5
+
+[[servers]]
+name = "mcp-detect"
+command = "/usr/bin/blackglass-mcp-detect"
+args = []
+startup_timeout_ms = 30000
+max_restarts = 5

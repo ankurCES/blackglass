@@ -34,6 +34,7 @@ fn ping_succeeds_after_auth_and_fails_before() {
         Engagement::new("e", "t", "2026-06-01T00:00:00Z", "2026-06-30T00:00:00Z"),
         Arc::new(AllowAll),
         Arc::new(AllowAll),
+        tokio::sync::broadcast::channel(64).0,
     );
 
     let rt = tokio::runtime::Runtime::new().unwrap();

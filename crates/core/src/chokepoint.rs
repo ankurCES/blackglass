@@ -1,6 +1,7 @@
 //! The single chokepoint. Every privileged action goes through here.
 //! See spec §2.1, §4.
 
+use crate::audit_broadcast;
 use crate::gates::{ActionRequest, ConfirmationOutcome, Gate3, Gate4};
 use blackglass_audit::{Chain, Event, EventKind};
 use blackglass_engagement::Engagement;
@@ -10,6 +11,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::broadcast;
 use tracing::info;
 
 #[derive(Debug, Error)]
@@ -125,16 +127,25 @@ pub struct Chokepoint {
     /// target) pair returns true from `is_python_routed`. When `None`,
     /// those tools are rejected with `PythonBridgeNotConfigured`.
     pub python_bridge: Option<Arc<dyn PythonBridge>>,
+    /// Broadcast sender for the operator-socket `audit.event` push
+    /// channel. Every `audit()` call appends to the chain AND sends
+    /// the event to this channel so subscribed operator clients
+    /// receive a live tail. The chokepoint does not own a
+    /// subscriber; main.rs creates the channel and clones it
+    /// everywhere an event is emitted.
+    pub event_tx: broadcast::Sender<Event>,
 }
 
 impl Chokepoint {
     pub fn new(
         chain: Chain, profile: LegacyProfile, engagement: Engagement,
         gate3: Arc<dyn Gate3>, gate4: Arc<dyn Gate4>,
+        event_tx: broadcast::Sender<Event>,
     ) -> Self {
         Self {
             chain, profile, engagement, gate3, gate4, seq: 0,
             evidence_dir: None, python_bridge: None,
+            event_tx,
         }
     }
 
@@ -159,7 +170,11 @@ impl Chokepoint {
             prev_hash: String::new(),
             kind, payload,
         };
-        self.chain.append(ev)?;
+        // Forward to `append_and_broadcast` so the event also reaches
+        // any operator client subscribed to `audit.event`. The chain
+        // is authoritative; the broadcast is best-effort and any send
+        // error is logged-and-swallowed by the helper.
+        audit_broadcast::append_and_broadcast(&mut self.chain, &self.event_tx, ev)?;
         Ok(())
     }
 }

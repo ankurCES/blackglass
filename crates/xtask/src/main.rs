@@ -36,7 +36,12 @@ enum Cmd {
     /// Verify an installed system meets the security prerequisites.
     VerifyInstall,
     /// Generate a draft AppArmor profile from a tool list.
-    ApparmorGenerate,
+    ApparmorGenerate {
+        /// Emit the secondary-sidecar profile (deepfake detector).
+        /// Otherwise emits the core profile.
+        #[arg(long)]
+        secondary_sidecar: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -48,7 +53,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::Sign { input } => bin_sign::sign(&input)?,
         Cmd::ConfinementTest => bin_confinement_test::run()?,
         Cmd::VerifyInstall => bin_verify_install::run()?,
-        Cmd::ApparmorGenerate => bin_apparmor_generate::run()?,
+        Cmd::ApparmorGenerate { secondary_sidecar } => {
+            bin_apparmor_generate::run(secondary_sidecar)?
+        }
     }
     Ok(())
 }

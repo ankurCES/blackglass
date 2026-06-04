@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blackglass_audit::Chain;
+use blackglass_audit::{Chain, Event};
 use blackglass_core::broker::ConfirmationBroker;
 use blackglass_core::chokepoint::Chokepoint;
 use blackglass_core::gates::BrokerGate3;
@@ -99,6 +99,19 @@ async fn main() -> Result<()> {
             let channel = ConfirmChannel::new();
             let gate3: Arc<dyn blackglass_core::gates::Gate3> =
                 Arc::new(BrokerGate3::new_anonymous(broker.clone(), channel.clone()));
+            // Sub-plan 4 task 2.5.8: the operator-socket `audit.event`
+            // push channel. Every `chain.append` call in the chokepoint
+            // (and the MCP supervisor and the `mcp_run_tool` handler)
+            // routes through `audit_broadcast::append_and_broadcast`,
+            // which both writes to the chain AND best-effort sends on
+            // this broadcast. Subscribed operator clients receive
+            // each event as a `{"method":"audit.event",...}` push.
+            // The capacity (1024) is generous: each event is small
+            // (~200 bytes JSON), so 1024 is ~200KB of in-memory queue.
+            // Subscribers that lag get a `Lagged` error and we skip
+            // ahead — the chain is authoritative, so they can
+            // re-read via `audit.query`.
+            let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<Event>(1024);
             // Construct the Python sidecar bridge. Default is the in-process
             // stub; `--python-bridge=real` requires the `real` feature on
             // blackglass-python-bridge. `--python-bin` is accepted but the
@@ -128,13 +141,18 @@ async fn main() -> Result<()> {
                 eng,
                 gate3,
                 Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone())),
+                event_tx.clone(),
             )
             .with_evidence_dir(evidence_dir)
             .with_python_bridge(python_bridge_impl);
             // Sub-plan 3: operator socket (Tauri UI). Runs concurrently with
             // the runtime socket accept loop below. We pass it the same
-            // broker (to resolve confirmations) and the same channel (to
-            // subscribe to pending confirmations).
+            // broker (to resolve confirmations), the same channel (to
+            // subscribe to pending confirmations), and a read-only handle
+            // to the audit chain (for `audit.query` / `audit.verify_chain`).
+            // We re-open the chain on the same path because `Chokepoint`
+            // already owns its `Chain` by value, and the operator socket
+            // only needs `&Chain` (read-only query/verify).
             let data_dir = socket
                 .parent()
                 .map(|p| p.to_path_buf())
@@ -142,11 +160,107 @@ async fn main() -> Result<()> {
             let operator_sock = data_dir.join("operator.sock");
             let op_broker = broker.clone();
             let op_channel = channel.clone();
+            let op_chain = Arc::new(std::sync::Mutex::new(Chain::open(&audit)?));
+            // Load mcp-servers.toml from XDG_CONFIG_HOME (default
+            // ~/.config). Missing file is not an error — we just run
+            // with no MCPs spawned and the operator's `mcp_run_tool`
+            // will return McpDown for every domain. This is the
+            // first-run / no-config-installed case.
+            let config_path = {
+                let xdg = std::env::var("XDG_CONFIG_HOME")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config"))
+                    });
+                match xdg {
+                    Some(dir) => dir.join("blackglass").join("mcp-servers.toml"),
+                    None => data_dir.join("mcp-servers.toml"),
+                }
+            };
+            let mcp_config = if config_path.exists() {
+                match blackglass_core::mcp_spawn_config::McpSpawnConfig::load(&config_path) {
+                    Ok(cfg) => {
+                        tracing::info!(
+                            path = %config_path.display(),
+                            servers = cfg.servers.len(),
+                            "loaded mcp-servers.toml"
+                        );
+                        cfg
+                    }
+                    Err(e) => {
+                        eprintln!("warning: failed to parse {}: {e}", config_path.display());
+                        blackglass_core::mcp_spawn_config::McpSpawnConfig::default()
+                    }
+                }
+            } else {
+                tracing::info!(
+                    path = %config_path.display(),
+                    "mcp-servers.toml not found; running with no MCPs spawned"
+                );
+                blackglass_core::mcp_spawn_config::McpSpawnConfig::default()
+            };
+            // Build a real McpSupervisor from the (possibly empty)
+            // config. The supervisor's audit chain is distinct from
+            // the chokepoint's chain (it lives in the data dir, not
+            // in the runtime dir) — the McpServer{Spawed,Exited}
+            // events go to the supervisor's chain and are visible to
+            // the operator via `audit.query` once 2.5.8 ships the
+            // cross-chain tail.
+            let sup_log_path = data_dir.join("supervisor.log");
+            let sup_chain_path = data_dir.join("supervisor-chain.jsonl");
+            let supervisor = match blackglass_core::mcp_supervisor::McpSupervisor::start_with_chain(
+                mcp_config,
+                &sup_log_path,
+                &sup_chain_path,
+                event_tx.clone(),
+            )
+            .await
+            {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    return Err(anyhow::anyhow!("failed to start McpSupervisor: {e}"));
+                }
+            };
+            // Use the real runtime.sock path (== `socket`) so
+            // mcp_run_tool can forward to it.
+            let runtime_sock_path = socket.clone();
+            // Operator-socket auth token (Task 2.5.7). If the file
+            // doesn't exist, generate a 32-byte hex token, write it
+            // mode 0600, and log the path so the operator can copy
+            // it into the Tauri client. The token is read on every
+            // connection (not cached), so rotation is just a write
+            // of the same file from a restart.
+            let operator_token_path = data_dir.join("operator.token");
+            if let Some(parent) = operator_token_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if !operator_token_path.exists() {
+                use rand::RngCore;
+                let mut bytes = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut bytes);
+                let token = hex::encode(bytes);
+                std::fs::write(&operator_token_path, format!("{token}\n"))?;
+                std::fs::set_permissions(
+                    &operator_token_path,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o600),
+                )?;
+                tracing::info!(
+                    path = %operator_token_path.display(),
+                    "operator token created"
+                );
+            }
             tokio::spawn(async move {
                 if let Err(e) = blackglass_core::operator_server::run(
                     &operator_sock,
                     op_broker,
                     op_channel,
+                    op_chain,
+                    supervisor,
+                    runtime_sock_path,
+                    operator_token_path,
+                    event_tx,
                 )
                 .await
                 {

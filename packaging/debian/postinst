@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# 1. Refuse to install on a system without AppArmor
+# 1. Refuse to install on a system without AppArmor.
 if ! command -v aa-enabled >/dev/null; then
     echo "blackglass requires AppArmor. Please install apparmor and apparmor-utils." >&2
     exit 1
@@ -11,21 +11,14 @@ if ! aa-enabled --quiet 2>/dev/null; then
     exit 1
 fi
 
-# 2. Create the blackglass group (system group, no login)
-if ! getent group blackglass >/dev/null; then
-    addgroup --system blackglass
-fi
-
-# 3. Set up /var/lib/blackglass (engagement data)
-install -d -m 0750 -o root -g blackglass /var/lib/blackglass
-install -d -m 0750 -o root -g blackglass /var/lib/blackglass/evidence
-install -d -m 0750 -o root -g blackglass /var/lib/blackglass/evidence/python-errors
-install -d -m 0750 -o root -g blackglass /var/lib/blackglass/reports
-install -d -m 0755 /var/run/blackglass
-
-# 4. Install AppArmor profiles
-for f in /etc/apparmor.d/blackglass-core /etc/apparmor.d/blackglass-polkit-helper; do
+# 2. Load AppArmor profiles.
+#    For upgrades from the v0 root-systemd profile, unload the
+#    old profile first so the new user-systemd profile can attach.
+#    (Same profile name; apparmor_parser -r replaces, but we -R
+#    defensively in case a future revision renames the profile.)
+for f in /etc/apparmor.d/blackglass-core /etc/apparmor.d/blackglass-secondary-sidecar; do
     if [ -f "$f" ]; then
+        apparmor_parser -R "$f" 2>/dev/null || true
         apparmor_parser -r "$f" || {
             echo "Failed to load $f. Refusing to continue." >&2
             exit 1
@@ -33,22 +26,13 @@ for f in /etc/apparmor.d/blackglass-core /etc/apparmor.d/blackglass-polkit-helpe
     fi
 done
 
-# 5. Reload udev rules for the Flipper
-if command -v udevadm >/dev/null; then
-    udevadm control --reload-rules
-fi
-
-# 6. Update the desktop + icon caches
-if command -v update-desktop-database >/dev/null; then
-    update-desktop-database /usr/share/applications
-fi
-if command -v gtk-update-icon-cache >/dev/null; then
-    gtk-update-icon-cache -f /usr/share/icons/hicolor
-fi
-
-# 7. Build the Python venv (idempotent — skips if already present)
+# 3. Build the Python venv (idempotent — skips if already present).
+#    Logs land under the user's state dir on first start; for
+#    now we use /var/log/blackglass to capture install-time
+#    failures (which happen before the user service exists).
 if [ ! -d /usr/lib/blackglass/python-venv ]; then
     echo "Building Python sidecar venv (this takes a minute)..."
+    install -d -m 0755 /var/log/blackglass
     {
         uv venv /usr/lib/blackglass/python-venv --python python3.12
         uv pip install \
@@ -61,32 +45,68 @@ if [ ! -d /usr/lib/blackglass/python-venv ]; then
             import blackglass_sidecar.audit_types
             print('sidecar venv OK')
         "
-    } > /var/lib/blackglass/evidence/sidecar-build.log 2>&1 || {
-        echo "Sidecar venv build failed. See /var/lib/blackglass/evidence/sidecar-build.log" >&2
+    } > /var/log/blackglass/sidecar-build.log 2>&1 || {
+        echo "Sidecar venv build failed. See /var/log/blackglass/sidecar-build.log" >&2
         rm -rf /usr/lib/blackglass/python-venv
         exit 1
     }
-    chmod 0750 /usr/lib/blackglass/python-venv
-    chown -R root:blackglass /usr/lib/blackglass/python-venv
+    chmod 0755 /usr/lib/blackglass/python-venv
 fi
 
-# 8. Add the operator (SUDO_USER) to the blackglass group (best-effort)
-REAL_USER="${SUDO_USER:-}"
-if [ -n "$REAL_USER" ]; then
-    if ! getent group blackglass | grep -q "\b${REAL_USER}\b"; then
-        adduser "$REAL_USER" blackglass 2>/dev/null || true
+# 4. Enable the user-systemd services. This is best-effort: only run
+#    if XDG_RUNTIME_DIR is set (i.e., the user is logged in) AND
+#    systemctl is available. If we're in a chroot or non-interactive
+#    dpkg, skip — the operator can run 'systemctl --user enable ...'
+#    themselves on first login.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && command -v systemctl >/dev/null; then
+    USER_NAME="${SUDO_USER:-$(id -un)}"
+    if [ "$USER_NAME" != "root" ] && id "$USER_NAME" >/dev/null 2>&1; then
+        # Symlink the .service files into the user's systemd dir.
+        USER_SYSTEMD_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)/.config/systemd/user"
+        install -d -m 0755 -o "$USER_NAME" "$USER_SYSTEMD_DIR"
+        for unit in blackglass-core.service blackglass-secondary-sidecar.service; do
+            ln -sf "/usr/lib/blackglass/systemd/user/$unit" \
+                   "$USER_SYSTEMD_DIR/$unit"
+        done
+        # Reload the user daemon and start the core.
+        su - "$USER_NAME" -c "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR systemctl --user daemon-reload" || true
+        su - "$USER_NAME" -c "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR systemctl --user enable blackglass-core.service blackglass-secondary-sidecar.service" || true
+        su - "$USER_NAME" -c "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR systemctl --user start blackglass-core.service" || true
     fi
 fi
 
-# 9. Print next steps
+# 5. Add the installing user to the udev group (so the Flipper works
+#    without manual intervention). Best-effort.
+if [ -n "${SUDO_USER:-}" ] && id "$SUDO_USER" >/dev/null 2>&1; then
+    if ! id -Gn "$SUDO_USER" | grep -qw udev; then
+        usermod -aG udev "$SUDO_USER" 2>/dev/null || true
+        echo "Added $SUDO_USER to the udev group. Log out and back in for the Flipper to work." >&2
+    fi
+fi
+
+# 6. Reload udev rules for the Flipper.
+if command -v udevadm >/dev/null; then
+    udevadm control --reload-rules || true
+fi
+
+# 7. Update the desktop + icon caches.
+if command -v update-desktop-database >/dev/null; then
+    update-desktop-database /usr/share/applications || true
+fi
+if command -v gtk-update-icon-cache >/dev/null; then
+    gtk-update-icon-cache -f /usr/share/icons/hicolor || true
+fi
+
+# 8. Print next steps.
 cat <<EOF
 blackglass installed.
 
 Next steps:
-  1. Log out and back in (so the 'blackglass' group takes effect).
-  2. Initialize your first profile:  blackglass profile init
-  3. Launch the UI:                   blackglass ui
+  1. Log out and back in (for the udev group to take effect, if you have a Flipper).
+  2. Launch the UI:  blackglass ui
+  3. (Optional) Initialize an engagement profile:  blackglass profile init
 
-The audit log is at: ~/.local/share/blackglass/audit/audit.jsonl
-To re-run the install:                curl -sSfL https://blackglass.dev/install.sh | sudo bash
+The audit log is at:  ~/.local/share/blackglass/audit/chain.jsonl
+The operator socket:  ~/.local/share/blackglass/runtime.sock
+To re-run the install:  curl -sSfL https://blackglass.dev/install.sh | sudo bash
 EOF

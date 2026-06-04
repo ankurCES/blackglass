@@ -139,6 +139,16 @@ Methods: `gate.check_and_dispatch`, `audit.read`, `audit.verify`, `engagement.cr
 
 One protocol, one review, one fuzzer target in `tests/security/`.
 
+### 2.4a Operator socket (core ↔ Tauri UI)
+
+A second Unix domain socket at `~/.local/share/blackglass/operator.sock` carries the higher-level, human-oriented API used by the Tauri app (per ADR 0009). It re-uses the same JSON-RPC dialect, adds a `auth` method that gates everything else on a `0600` token file, and additionally carries *server-pushed* events for the live audit tail.
+
+**Methods:** `auth` (present token, flip per-connection `authenticated` flag), `audit.query`, `audit.verify_chain`, `mcp.run_tool`, `mcp.list_servers`, `subscribe` (see below).
+
+**Live tail — `audit.event` push.** The Tauri app's "Audit log browser" needs real-time updates as new events land in the chain. A `subscribe({"channel":"audit.event"})` call attaches a per-connection task to the core's `tokio::sync::broadcast::Sender<Event>`; from that point on, every event written via `audit_broadcast::append_and_broadcast` is pushed to the client as a newline-terminated `{"jsonrpc":"2.0","method":"audit.event","params":{"event":<Event>}}` frame. The push is best-effort: a slow client that lags past the channel's `Lagged` watermark continues from the next event (the full chain is still authoritative via `audit.query`). A client that disconnects drops its receiver; the broadcast sender is shared with the chokepoint / supervisor emitters and outlives any one connection.
+
+The single chokepoint `append_and_broadcast` (defined in `crates/core/src/audit_broadcast.rs`) is the *only* write path for the chain — it appends to the chain first, then best-effort broadcasts. This guarantees the chain and the live tail can never disagree on event order, and that no code path can "forget" to notify subscribers.
+
 ### 2.5 Lifecycle
 
 1. User runs `blackglass` → Tauri app starts.
