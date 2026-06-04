@@ -44,6 +44,10 @@ pub enum EventKind {
     PythonBridgeInvoked,
     PythonBridgeFailed,
     PythonBridgeEvidenceDumped,
+    McpServerSpawned { server: String, pid: u32 },
+    McpServerExited { server: String, code: i32, restart_count: u32 },
+    McpRunStarted { domain: String, target: String },
+    McpRunCompleted { domain: String, target: String, ok: bool, ms: u64 },
     #[serde(other)]
     Other,
 }
