@@ -1,6 +1,7 @@
 [package]
 name = "blackglass-core"
 version = "0.1.0"
+description = "Blackglass analyst-mode security platform: chokepoint, audit log, Tauri UI, Python sidecar, MCP supervisor"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -35,3 +36,86 @@ toml = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# ──────────────────────────────────────────────────────────────────────
+# .deb packaging — blackglass-core is the meta-package that bundles
+# the operator CLI, the chokepoint binary, all 6 MCP servers, the
+# secondary sidecar, the Tauri UI, the systemd units, the AppArmor
+# profiles, and the mcp-servers.toml.example into one installable
+# .deb. cargo-deb reads the asset list below and assembles the
+# package from the prebuilt target/release/ artifacts.
+#
+# Build with:  cargo deb -p blackglass-core --no-build
+# (Run after `cargo build --release --workspace` from the repo root.)
+# ──────────────────────────────────────────────────────────────────────
+[package.metadata.deb]
+name = "blackglass"
+maintainer = "Blackglass <security@blackglass.dev>"
+copyright = "2024-2026, Blackglass"
+license-file = ["../../LICENSE"]
+section = "net"
+priority = "optional"
+depends = "$auto, dbus, python3 (>= 3.12), uv, apparmor (>= 3.0), apparmor-utils"
+extended-description = """\
+Blackglass is a local-first, audit-logged security tool platform.
+The core runs as a user-systemd service (no polkit, no /var/lib/blackglass,
+no /var/run/blackglass). All operator state lives in
+~/.local/share/blackglass/. The Tauri UI is a single desktop binary
+that speaks to the core over a Unix-domain socket."""
+
+# Each asset line is: [source_path, dest_path, mode]
+# The paths are relative to the workspace root (the dir that
+# contains the workspace Cargo.toml, two levels up from this
+# crate's Cargo.toml).
+assets = [
+  # Operator CLI
+  ["../../target/release/blackglass", "usr/bin/", "755"],
+  # Chokepoint
+  ["../../target/release/blackglass-core", "usr/bin/", "755"],
+  # Tauri desktop app (embeds its own UI assets at compile time)
+  ["../../target/release/blackglass-app", "usr/bin/", "755"],
+  # Deepfake detector (separate AppArmor profile)
+  ["../../target/release/blackglass-secondary-sidecar", "usr/bin/", "755"],
+  # The 6 MCP server binaries (each supervised by the core)
+  ["../../target/release/blackglass-mcp-osint", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-packets", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-ad", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-flipper", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-phish", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-detect", "usr/bin/", "755"],
+  # NOTE: The Tauri UI assets are embedded into the blackglass-app
+  # binary at compile time (via tauri::generate_context!() in
+  # app/src-tauri/src/main.rs). They are NOT shipped separately in
+  # the .deb — the binary is self-contained. We keep the
+  # Python sidecar + the operator assets (MCPs, systemd, AppArmor)
+  # as separate .deb assets because the runtime needs to update
+  # them independently.
+  # Python sidecar source (installed to /usr/share for the
+  # postinst to build the venv into /usr/lib/blackglass/python-venv/).
+  # cargo-deb 2.0.4 has no glob support; we ship the package's
+  # pyproject.toml + the top-level package dir. Sub-modules inside
+  # the package must be added individually if/when they're added
+  # to the sidecar (the current 4 bridges are in __init__.py-free
+  # top-level modules so this is fine for now).
+  ["../../python/sidecar/pyproject.toml", "usr/share/blackglass/python/sidecar/", "644"],
+  ["../../python/sidecar/src/blackglass_sidecar/audit_types.py", "usr/share/blackglass/python/sidecar/src/blackglass_sidecar/", "644"],
+  ["../../python/sidecar/src/blackglass_sidecar/scapy_bridge.py", "usr/share/blackglass/python/sidecar/src/blackglass_sidecar/", "644"],
+  ["../../python/sidecar/src/blackglass_sidecar/impacket_bridge.py", "usr/share/blackglass/python/sidecar/src/blackglass_sidecar/", "644"],
+  ["../../python/sidecar/src/blackglass_sidecar/hardware_bridge.py", "usr/share/blackglass/python/sidecar/src/blackglass_sidecar/", "644"],
+  ["../../python/sidecar/src/blackglass_sidecar/detect_bridge.py", "usr/share/blackglass/python/sidecar/src/blackglass_sidecar/", "644"],
+  ["../../python/sidecar/src/blackglass_sidecar/__init__.py", "usr/share/blackglass/python/sidecar/src/blackglass_sidecar/", "644"],
+  # User-systemd unit files (postinst symlinks into
+  # ~/.config/systemd/user/ for the installing user)
+  ["../../packaging/systemd/blackglass-core.service", "usr/lib/blackglass/systemd/user/", "644"],
+  ["../../packaging/systemd/blackglass-secondary-sidecar.service", "usr/lib/blackglass/systemd/user/", "644"],
+  # AppArmor profiles (loaded by postinst via apparmor_parser -r)
+  ["../../packaging/apparmor/blackglass-core", "etc/apparmor.d/", "644"],
+  ["../../packaging/apparmor/blackglass-secondary-sidecar", "etc/apparmor.d/", "644"],
+  # Example MCP spawn config (operator copies to
+  # ~/.config/blackglass/mcp-servers.toml to enable supervision)
+  ["../../packaging/mcp-servers.toml.example", "etc/blackglass/", "644"],
+  # udev rule for the Flipper (reload via udevadm in postinst)
+  ["../../packaging/udev/99-blackglass-flipper.rules", "lib/udev/rules.d/", "644"],
+  # Desktop entry
+  ["../../packaging/debian/blackglass.desktop", "usr/share/applications/", "644"],
+]
