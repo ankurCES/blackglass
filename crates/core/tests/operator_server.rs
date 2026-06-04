@@ -1,10 +1,21 @@
 use blackglass_audit::Chain;
 use blackglass_core::broker::ConfirmationBroker;
+use blackglass_core::mcp_spawn_config::McpSpawnConfig;
+use blackglass_core::mcp_supervisor::McpSupervisor;
 use blackglass_core::operator_server::{run, ConfirmChannel, ConfirmRequest};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+
+/// Build a no-op `McpSupervisor` (empty config) for tests that don't
+/// exercise the MCP wiring. Returns the supervisor wrapped in an Arc;
+/// the supervisor's monitor task is harmless when the config is empty.
+async fn noop_supervisor() -> Arc<McpSupervisor> {
+    let cfg = McpSpawnConfig::default();
+    let log = std::env::temp_dir().join("blackglass-noop-supervisor.log");
+    Arc::new(McpSupervisor::start(cfg, &log).await.unwrap())
+}
 
 #[tokio::test]
 async fn accepts_connections_and_survives_malformed_input() {
@@ -14,10 +25,12 @@ async fn accepts_connections_and_survives_malformed_input() {
     let broker = ConfirmationBroker::new();
     let channel = ConfirmChannel::new();
     let chain = Arc::new(Chain::open(&chain_path).unwrap());
+    let supervisor = noop_supervisor().await;
+    let runtime_sock = dir.path().join("runtime.sock");
 
     let server = tokio::spawn({
         let p = sock_path.clone();
-        async move { run(&p, broker, channel, chain).await }
+        async move { run(&p, broker, channel, chain, supervisor, runtime_sock).await }
     });
 
     for _ in 0..50 {
@@ -64,11 +77,13 @@ async fn channel_push_forwards_to_connected_client() {
     let broker = ConfirmationBroker::new();
     let channel = ConfirmChannel::new();
     let chain = Arc::new(Chain::open(&chain_path).unwrap());
+    let supervisor = noop_supervisor().await;
+    let runtime_sock = dir.path().join("runtime.sock");
 
     let server = tokio::spawn({
         let p = sock_path.clone();
         let c = channel.clone();
-        async move { run(&p, broker, c, chain).await }
+        async move { run(&p, broker, c, chain, supervisor, runtime_sock).await }
     });
 
     for _ in 0..50 {

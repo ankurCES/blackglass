@@ -11,6 +11,8 @@
 //! marker is left in `operator_server.rs`.
 
 use blackglass_audit::{Chain, Event, EventKind};
+use blackglass_core::mcp_spawn_config::McpSpawnConfig;
+use blackglass_core::mcp_supervisor::McpSupervisor;
 use blackglass_core::operator_server::{run, ConfirmChannel};
 use serde_json::json;
 use std::path::PathBuf;
@@ -19,6 +21,14 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+
+/// Build a no-op `McpSupervisor` (empty config) for tests that don't
+/// exercise the MCP wiring.
+async fn noop_supervisor() -> Arc<McpSupervisor> {
+    let cfg = McpSpawnConfig::default();
+    let log = std::env::temp_dir().join("blackglass-noop-supervisor-audit.log");
+    Arc::new(McpSupervisor::start(cfg, &log).await.unwrap())
+}
 
 /// Spawn a fresh operator server on a tempdir socket backed by a fresh
 /// audit chain at `<dir>/chain.jsonl`. Returns the socket path and a
@@ -31,9 +41,11 @@ async fn spawn_operator_with_chain(
     let chain = Chain::open(&chain_path).expect("open empty chain");
     let broker = blackglass_core::broker::ConfirmationBroker::new();
     let channel = ConfirmChannel::new();
+    let supervisor = noop_supervisor().await;
+    let runtime_sock = dir.path().join("runtime.sock");
     let server = tokio::spawn({
         let p = sock_path.clone();
-        async move { run(&p, broker, channel, Arc::new(chain)).await }
+        async move { run(&p, broker, channel, Arc::new(chain), supervisor, runtime_sock).await }
     });
     // Wait for the socket file to appear.
     for _ in 0..100 {

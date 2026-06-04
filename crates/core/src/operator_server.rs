@@ -3,7 +3,7 @@
 //! events and responds to `confirm.resolve` and `ping` calls. See spec
 //! §2.4 + §6.2.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -11,6 +11,8 @@ use tokio::sync::broadcast;
 
 use crate::audit_query;
 use crate::broker::{ConfirmationBroker, Decision};
+use crate::mcp_run_tool;
+use crate::mcp_supervisor::McpSupervisor;
 use blackglass_audit::Chain;
 
 /// A `confirm.request` event to be pushed to a connected operator.
@@ -60,6 +62,8 @@ pub async fn run(
     broker: ConfirmationBroker,
     channel: ConfirmChannel,
     chain: Arc<Chain>,
+    supervisor: Arc<McpSupervisor>,
+    runtime_sock_path: PathBuf,
 ) -> std::io::Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -75,8 +79,10 @@ pub async fn run(
         let broker = broker.clone();
         let channel = channel.clone();
         let chain = chain.clone();
+        let supervisor = supervisor.clone();
+        let runtime_sock_path = runtime_sock_path.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, broker, channel, chain).await {
+            if let Err(e) = handle(stream, broker, channel, chain, supervisor, runtime_sock_path).await {
                 eprintln!("operator socket handler error: {e}");
             }
         });
@@ -88,6 +94,8 @@ async fn handle(
     broker: ConfirmationBroker,
     channel: Arc<ConfirmChannel>,
     chain: Arc<Chain>,
+    supervisor: Arc<McpSupervisor>,
+    runtime_sock_path: PathBuf,
 ) -> std::io::Result<()> {
     let (read, write) = stream.into_split();
     // The write half is shared between two tasks:
@@ -133,7 +141,9 @@ async fn handle(
 
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
         let resp = match parsed {
-            Ok(v) => handle_rpc(v, &broker, &chain).await,
+            Ok(v) => {
+                handle_rpc(v, &broker, &chain, &supervisor, runtime_sock_path.clone()).await
+            }
             Err(_) => Some(jsonrpc_error(None, -32700, "parse error")),
         };
 
@@ -152,6 +162,8 @@ async fn handle_rpc(
     v: serde_json::Value,
     broker: &ConfirmationBroker,
     chain: &Chain,
+    supervisor: &Arc<McpSupervisor>,
+    runtime_sock_path: PathBuf,
 ) -> Option<String> {
     let id = v.get("id").cloned();
     let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -195,6 +207,45 @@ async fn handle_rpc(
         "audit.verify_chain" => match audit_query::handle_verify(chain) {
             Ok(count) => Some(jsonrpc_ok(id, serde_json::json!(count))),
             Err(e) => Some(jsonrpc_error(id, -32603, &format!("audit: {e}"))),
+        },
+        "mcp_run_tool" => match serde_json::from_value::<mcp_run_tool::McpRunParams>(params) {
+            Ok(p) => match mcp_run_tool::handle_mcp_run_tool(p, supervisor, &runtime_sock_path).await {
+                Ok(resp) => match serde_json::to_value(&resp) {
+                    Ok(v) => Some(jsonrpc_ok(id, v)),
+                    Err(e) => Some(jsonrpc_error(id, -32603, &format!("serialize: {e}"))),
+                },
+                // Per-variant error codes:
+                //   -32010 UnknownDomain
+                //   -32011 McpDown
+                //   -32012 Timeout
+                //   -32013 McpError (chokepoint denied, or runtime error)
+                // The Tauri UI can switch on `error.code` to render
+                // domain-specific UX (e.g. "MCP not running, retry?" vs
+                // "denied by policy"). The `error.message` is the
+                // `Display` of the variant, which carries a
+                // recognizable substring per the test plan.
+                Err(mcp_run_tool::McpRunError::UnknownDomain(_)) => {
+                    Some(jsonrpc_error(id, -32010, "domain is not routed to any MCP server"))
+                }
+                Err(mcp_run_tool::McpRunError::McpDown(ref s)) => {
+                    Some(jsonrpc_error(id, -32011, &format!("mcp server {s} is not running")))
+                }
+                Err(e @ mcp_run_tool::McpRunError::Timeout(_, _)) => {
+                    // Use the variant's own Display so the test's
+                    // `msg.contains("timeout")` assertion succeeds and
+                    // the message stays in one place.
+                    Some(jsonrpc_error(id, -32012, &format!("{e}")))
+                }
+                Err(e @ mcp_run_tool::McpRunError::McpError(..)) => {
+                    // The inner message from the chokepoint (e.g. "gate
+                    // denied: ...") is in `e`'s Display, so we forward
+                    // it verbatim. The Tauri UI checks substrings like
+                    // "denied" / "gate" to render the right UX.
+                    Some(jsonrpc_error(id, -32013, &format!("{e}")))
+                }
+                Err(e) => Some(jsonrpc_error(id, -32603, &format!("mcp: {e}"))),
+            },
+            Err(e) => Some(jsonrpc_error(id, -32602, &format!("invalid params: {e}"))),
         },
         _ => Some(jsonrpc_error(id, -32601, "method not found")),
     }

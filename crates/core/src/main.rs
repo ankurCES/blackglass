@@ -147,12 +147,61 @@ async fn main() -> Result<()> {
             let op_broker = broker.clone();
             let op_channel = channel.clone();
             let op_chain = Arc::new(Chain::open(&audit)?);
+            // TODO(2.5.6): wire a real `McpSupervisor` (built from
+            // `mcp-servers.toml`) and the real `runtime.sock` path
+            // (== `socket` above) into the operator server. For 2.5.5
+            // we pass placeholders: an empty-config supervisor (whose
+            // `status(name)` returns `None` for everything, so
+            // `mcp_run_tool` will always return `McpDown` until 2.5.6
+            // fills this in) and a placeholder socket path that won't
+            // exist (so even if the supervisor is alive, the runtime
+            // forward will fail with a clear `NotFound`). Neither path
+            // is exercised in production before 2.5.6 ships.
+            let placeholder_supervisor = {
+                let cfg = blackglass_core::mcp_spawn_config::McpSpawnConfig::default();
+                let sup_path = data_dir.join("supervisor-placeholder.log");
+                if let Some(parent) = sup_path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                match blackglass_core::mcp_supervisor::McpSupervisor::start_with_chain(
+                    cfg,
+                    &sup_path,
+                    &data_dir.join("chain-placeholder.jsonl"),
+                )
+                .await
+                {
+                    Ok(s) => Arc::new(s),
+                    Err(e) => {
+                        eprintln!("failed to start placeholder supervisor: {e}");
+                        // Build a no-op supervisor by going through
+                        // start_with_chain on a fresh tempdir. If
+                        // even that fails, the operator server
+                        // can't be wired and we should exit.
+                        let tmp = std::env::temp_dir().join(format!(
+                            "blackglass-supervisor-fallback-{}.log",
+                            std::process::id()
+                        ));
+                        Arc::new(
+                            blackglass_core::mcp_supervisor::McpSupervisor::start_with_chain(
+                                blackglass_core::mcp_spawn_config::McpSpawnConfig::default(),
+                                &tmp,
+                                &tmp.with_extension("jsonl"),
+                            )
+                            .await
+                            .expect("start fallback placeholder supervisor"),
+                        )
+                    }
+                }
+            };
+            let placeholder_runtime_sock = PathBuf::from("/tmp/blackglass-not-yet-set.sock");
             tokio::spawn(async move {
                 if let Err(e) = blackglass_core::operator_server::run(
                     &operator_sock,
                     op_broker,
                     op_channel,
                     op_chain,
+                    placeholder_supervisor,
+                    placeholder_runtime_sock,
                 )
                 .await
                 {

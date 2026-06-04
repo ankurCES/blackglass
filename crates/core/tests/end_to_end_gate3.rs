@@ -26,12 +26,15 @@ use blackglass_audit::Chain;
 use blackglass_core::broker::ConfirmationBroker;
 use blackglass_core::chokepoint::Chokepoint;
 use blackglass_core::gates::{BrokerGate3, Gate3, Gate4};
+use blackglass_core::mcp_spawn_config::McpSpawnConfig;
+use blackglass_core::mcp_supervisor::McpSupervisor;
 use blackglass_core::operator_server::{run as run_operator, ConfirmChannel};
 use blackglass_core::sanitizer::RealSanitizer;
 use blackglass_core::server::Server;
 use blackglass_engagement::{Engagement, Target, TargetKind};
 use blackglass_ipc::encode_frame;
 use blackglass_profile::Profile;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -91,8 +94,30 @@ async fn destructive_action_requires_operator_allow() {
     let op_channel = channel.clone();
     let op_sock = operator_sock.clone();
     let op_chain = std::sync::Arc::new(Chain::open(&audit_path).unwrap());
+    // 2.5.5 added two args to `run_operator`: a supervisor
+    // (used by `mcp_run_tool`'s liveness pre-flight) and the
+    // runtime.sock path (the forward target). This test doesn't
+    // exercise `mcp_run_tool` — only `confirm.resolve` and the
+    // Gate-3 wiring — so an empty-config placeholder supervisor
+    // and a dummy runtime.sock path are fine.
+    let sup_dir = tempdir().unwrap();
+    let sup_log = sup_dir.path().join("supervisor.log");
+    let sup_chain = sup_dir.path().join("chain.jsonl");
+    let placeholder_sup = McpSupervisor::start_with_chain(
+        McpSpawnConfig::default(),
+        &sup_log,
+        &sup_chain,
+    )
+    .await
+    .expect("start placeholder supervisor");
+    let op_sup = std::sync::Arc::new(placeholder_sup);
+    let op_runtime_sock = std::path::PathBuf::from("/tmp/blackglass-not-yet-set.sock");
     let operator_handle = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(5), run_operator(&op_sock, op_broker, op_channel, op_chain)).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_operator(&op_sock, op_broker, op_channel, op_chain, op_sup, op_runtime_sock),
+        )
+        .await;
     });
 
     // Wait for both sockets to come up.
@@ -234,8 +259,30 @@ async fn destructive_action_can_be_denied_by_operator() {
     let op_channel = channel.clone();
     let op_sock = operator_sock.clone();
     let op_chain = std::sync::Arc::new(Chain::open(&audit_path).unwrap());
+    // 2.5.5 added two args to `run_operator`: a supervisor
+    // (used by `mcp_run_tool`'s liveness pre-flight) and the
+    // runtime.sock path (the forward target). This test doesn't
+    // exercise `mcp_run_tool` — only `confirm.resolve` and the
+    // Gate-3 wiring — so an empty-config placeholder supervisor
+    // and a dummy runtime.sock path are fine.
+    let sup_dir = tempdir().unwrap();
+    let sup_log = sup_dir.path().join("supervisor.log");
+    let sup_chain = sup_dir.path().join("chain.jsonl");
+    let placeholder_sup = McpSupervisor::start_with_chain(
+        McpSpawnConfig::default(),
+        &sup_log,
+        &sup_chain,
+    )
+    .await
+    .expect("start placeholder supervisor");
+    let op_sup = std::sync::Arc::new(placeholder_sup);
+    let op_runtime_sock = std::path::PathBuf::from("/tmp/blackglass-not-yet-set.sock");
     let operator_handle = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(5), run_operator(&op_sock, op_broker, op_channel, op_chain)).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_operator(&op_sock, op_broker, op_channel, op_chain, op_sup, op_runtime_sock),
+        )
+        .await;
     });
 
     for path in [&runtime_sock, &operator_sock] {
