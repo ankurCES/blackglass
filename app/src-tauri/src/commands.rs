@@ -95,6 +95,32 @@ pub async fn audit_event(
     Ok(events.into_iter().next().unwrap_or(serde_json::Value::Null))
 }
 
+/// Page through the audit log. Pass-through to the core's
+/// `audit.query` method; returns the full QueryResponse (events +
+/// chain head + verified flag + page metadata) so the Svelte audit
+/// log can show "chain verified at <hash>" without a second
+/// round-trip.
+pub async fn audit_query(
+    filter: serde_json::Value,
+    page: u32,
+    page_size: u32,
+    sock_path: &Path,
+    token: &str,
+) -> Result<serde_json::Value, String> {
+    let mut stream = connect_and_auth(sock_path, token).map_err(op_err_to_string)?;
+    let result = call(
+        &mut stream,
+        "audit.query",
+        serde_json::json!({
+            "filter": filter,
+            "page": page,
+            "page_size": page_size,
+        }),
+    )
+    .map_err(op_err_to_string)?;
+    Ok(result)
+}
+
 // Tauri command bindings (wrap the pure functions with State access).
 // The Svelte side calls these via `invoke("mcp_run_tool_cmd", { ... })`.
 
@@ -131,4 +157,14 @@ pub async fn audit_event_cmd(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<serde_json::Value, String> {
     audit_event(id, &state.operator_sock_path, &state.operator_token).await
+}
+
+#[tauri::command]
+pub async fn audit_query_cmd(
+    filter: serde_json::Value,
+    page: u32,
+    page_size: u32,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<serde_json::Value, String> {
+    audit_query(filter, page, page_size, &state.operator_sock_path, &state.operator_token).await
 }

@@ -8,7 +8,7 @@
 //! path) and then respond to the *next* frame (the actual method
 //! call) with the scripted tool response.
 
-use blackglass_app::commands::{mcp_run_tool, McpRunRequest, McpRunResponse};
+use blackglass_app::commands::{audit_query, mcp_run_tool, McpRunRequest, McpRunResponse};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -135,4 +135,47 @@ async fn mcp_run_tool_parses_full_response_shape() {
     assert!(resp.ok);
     assert_eq!(resp.stdout.as_deref(), Some("hello\n"));
     assert_eq!(resp.audit_event_id.as_deref(), Some("evt-1"));
+}
+
+#[tokio::test]
+async fn audit_query_returns_rows_when_operator_returns_ok() {
+    let sock = spawn_fake_operator(vec![
+        r#"{"jsonrpc":"2.0","id":0,"result":{"ok":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true,"events":[{"id":"evt-1","actor":"alice","action":"ad-impacket_psexec","target":"dc01","ts":1700000000,"verdict":"allow"}],"chain_head":"abc","verified":true,"page":0,"page_size":50,"total":1}}"#.to_string(),
+    ]);
+    let token = "test-token\n".to_string();
+    let filter = serde_json::json!({});
+    let result = audit_query(filter, 0, 50, &sock, &token).await.unwrap();
+    let events = result["events"].as_array().expect("events array");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["actor"], "alice");
+    assert_eq!(events[0]["verdict"], "allow");
+    assert_eq!(result["verified"], true);
+    assert_eq!(result["total"], 1);
+}
+
+#[tokio::test]
+async fn audit_query_returns_empty_when_no_events() {
+    let sock = spawn_fake_operator(vec![
+        r#"{"jsonrpc":"2.0","id":0,"result":{"ok":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true,"events":[],"chain_head":"abc","verified":true,"page":0,"page_size":10,"total":0}}"#.to_string(),
+    ]);
+    let token = "test-token\n".to_string();
+    let filter = serde_json::json!({"since": 1700000000});
+    let result = audit_query(filter, 0, 10, &sock, &token).await.unwrap();
+    let events = result["events"].as_array().expect("events array");
+    assert!(events.is_empty());
+    assert_eq!(result["total"], 0);
+}
+
+#[tokio::test]
+async fn audit_query_returns_err_when_operator_returns_error() {
+    let sock = spawn_fake_operator(vec![
+        r#"{"jsonrpc":"2.0","id":0,"result":{"ok":true}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"audit log corrupted"}}"#.to_string(),
+    ]);
+    let token = "test-token\n".to_string();
+    let filter = serde_json::json!({});
+    let resp = audit_query(filter, 0, 10, &sock, &token).await;
+    assert!(resp.is_err(), "expected error when operator returns JSON-RPC error");
 }

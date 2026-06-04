@@ -50,6 +50,21 @@ export class McpClient {
   async getAuditEvent(id: string): Promise<AuditEvent | null> {
     return await invoke<AuditEvent | null>("audit_event", { id });
   }
+
+  /**
+   * Page through the audit log. Returns the full QueryResponse from
+   * the core: events + total_matched + page + page_size +
+   * hash_chain_head + hash_chain_verified + query_ms. The Svelte
+   * AuditLog component uses this to render the list + the "chain
+   * verified at <hash>" badge.
+   */
+  async queryAudit(
+    filter: unknown,
+    page: number,
+    pageSize: number,
+  ): Promise<unknown> {
+    return await invoke("audit_query", { filter, page, pageSize });
+  }
 }
 
 /** Singleton for app-wide use. */

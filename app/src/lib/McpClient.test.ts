@@ -71,4 +71,23 @@ describe("McpClient", () => {
     expect(invoke).toHaveBeenCalledWith("mcp_list_tools", { domain: "osint" });
     expect(Array.isArray(tools)).toBe(true);
   });
+
+  it("queryAudit calls audit_query with the right args", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({
+      events: [],
+      total_matched: 0,
+      page: 0,
+      page_size: 50,
+      hash_chain_head: "abc",
+      hash_chain_verified: true,
+      query_ms: 5,
+    });
+    const resp = await client.queryAudit({ kind: "all" }, 0, 50);
+    expect(invoke).toHaveBeenCalledWith("audit_query", {
+      filter: { kind: "all" },
+      page: 0,
+      pageSize: 50,
+    });
+    expect((resp as any).hash_chain_verified).toBe(true);
+  });
 });

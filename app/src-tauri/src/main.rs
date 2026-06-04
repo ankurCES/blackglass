@@ -50,6 +50,7 @@ async fn main() {
             blackglass_app::commands::mcp_run_tool_cmd,
             blackglass_app::commands::mcp_list_tools_cmd,
             blackglass_app::commands::audit_event_cmd,
+            blackglass_app::commands::audit_query_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running blackglass app");
