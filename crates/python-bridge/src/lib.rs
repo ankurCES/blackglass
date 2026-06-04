@@ -127,11 +127,16 @@ fn is_safe_module(m: &str) -> bool {
     // Only modules under the `blackglass_sidecar` namespace are allowed.
     // This is enforced at the bridge boundary so the chokepoint can't
     // be tricked into calling arbitrary Python.
-    m == "blackglass_sidecar.scapy_bridge"
-        || m == "blackglass_sidecar.impacket_bridge"
-        || m == "blackglass_sidecar.hardware_bridge"
-        || m == "blackglass_sidecar.detect_bridge"
-        || m == "blackglass_sidecar.audit_types"
+    matches!(
+        m,
+        "blackglass_sidecar.scapy_bridge"
+            | "blackglass_sidecar.impacket_bridge"
+            | "blackglass_sidecar.hardware_bridge"
+            | "blackglass_sidecar.detect_bridge"
+            | "blackglass_sidecar.evilginx_bridge"
+            | "blackglass_sidecar.gophish_bridge"
+            | "blackglass_sidecar.audit_types"
+    )
 }
 
 /// What kind of bridge the chokepoint should use.

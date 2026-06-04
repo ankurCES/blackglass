@@ -117,3 +117,25 @@ async fn build_for_real_kind_in_stub_build_returns_stub() {
     let resp = bridge.invoke(req).await.expect("invoke");
     assert!(resp.result["stub"].as_bool().unwrap_or(false));
 }
+
+#[tokio::test]
+async fn stub_allows_evilginx_and_gophish_modules() {
+    // The 4 new MCP server crates (mcp-ad, mcp-flipper, mcp-phish,
+    // mcp-detect) need the bridge to allow their modules.
+    let bridge = StubBridge::new();
+    for (module, function) in [
+        ("blackglass_sidecar.evilginx_bridge", "list"),
+        ("blackglass_sidecar.gophish_bridge", "campaign_list"),
+        ("blackglass_sidecar.detect_bridge", "image"),
+        ("blackglass_sidecar.hardware_bridge", "flipper_list"),
+    ] {
+        let req = BridgeRequest {
+            module: module.into(),
+            function: function.into(),
+            args: json!({}),
+            evidence_dir: None,
+        };
+        let resp = bridge.invoke(req).await.expect(module);
+        assert_eq!(resp.result["module"], module);
+    }
+}

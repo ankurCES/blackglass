@@ -1,0 +1,26 @@
+[package]
+name = "blackglass-mcp-flipper"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "blackglass-mcp-flipper"
+path = "src/main.rs"
+
+[dependencies]
+blackglass-runtime       = { path = "../runtime" }
+blackglass-python-bridge = { path = "../python-bridge" }
+rmcp.workspace = true
+tokio.workspace = true
+clap = { workspace = true, features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
