@@ -1,3 +1,4 @@
+pub mod audit_broadcast;
 pub mod audit_query;
 pub mod broker;
 pub mod chokepoint;

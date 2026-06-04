@@ -20,7 +20,7 @@ async fn supervisor_spawns_a_long_running_child_and_sees_it_alive() {
         servers: vec![spec("sleeper", "/bin/sh", &["-c", "sleep 30"])],
     };
     let log_path = dir.path().join("supervisor.log");
-    let sup = McpSupervisor::start(config, &log_path).await.unwrap();
+    let sup = McpSupervisor::start(config, &log_path, tokio::sync::broadcast::channel(64).0).await.unwrap();
     // Give it a moment to spawn.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let status = sup.status("sleeper").await;
@@ -37,7 +37,7 @@ async fn supervisor_restarts_a_dying_child_with_backoff() {
         servers: vec![spec("crasher", "/bin/sh", &["-c", "exit 1"])],
     };
     let log_path = dir.path().join("supervisor.log");
-    let sup = McpSupervisor::start(config, &log_path).await.unwrap();
+    let sup = McpSupervisor::start(config, &log_path, tokio::sync::broadcast::channel(64).0).await.unwrap();
     // Wait for the backoff sequence: 1s + 2s + 4s = 7s minimum.
     tokio::time::sleep(Duration::from_secs(8)).await;
     let status = sup.status("crasher").await;
@@ -53,7 +53,8 @@ async fn supervisor_emits_mcp_server_exited_audit_events() {
         servers: vec![spec("crasher", "/bin/sh", &["-c", "exit 1"])],
     };
     let log_path = dir.path().join("supervisor.log");
-    let sup = McpSupervisor::start_with_chain(config, &log_path, &chain_path).await.unwrap();
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(64);
+    let sup = McpSupervisor::start_with_chain(config, &log_path, &chain_path, event_tx).await.unwrap();
     tokio::time::sleep(Duration::from_secs(8)).await;
     let chain = blackglass_audit::Chain::open(&chain_path).unwrap();
     // Chain::query returns an AuditPage; events live at `.events`.
@@ -71,7 +72,8 @@ async fn supervisor_spawns_emits_mcp_server_spawned_audit_event() {
         servers: vec![spec("sleeper", "/bin/sh", &["-c", "sleep 30"])],
     };
     let log_path = dir.path().join("supervisor.log");
-    let sup = McpSupervisor::start_with_chain(config, &log_path, &chain_path).await.unwrap();
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(64);
+    let sup = McpSupervisor::start_with_chain(config, &log_path, &chain_path, event_tx).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     let chain = blackglass_audit::Chain::open(&chain_path).unwrap();
     let page = chain.query(&serde_json::json!({ "kind": "all" }), 0, 1000).unwrap();

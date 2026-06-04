@@ -38,6 +38,7 @@ fn setup() -> (Chokepoint, tempfile::TempDir) {
         chain, profile, eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     )
     .with_python_bridge(Some(Arc::new(StubBridge::new())
         as Arc<dyn PythonBridge>));
@@ -91,6 +92,7 @@ async fn python_routed_tool_with_no_bridge_configured_is_rejected() {
         chain, profile, eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     );
     // Intentionally NOT calling .with_python_bridge(...).
 
@@ -158,6 +160,7 @@ async fn ad_impacket_psexec_routes_to_impacket_bridge() {
         chain, profile, eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     )
     .with_python_bridge(Some(Arc::new(StubBridge::new())
         as Arc<dyn PythonBridge>));
@@ -191,6 +194,7 @@ async fn detect_image_routes_to_detect_bridge() {
         chain, profile, eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     )
     .with_python_bridge(Some(Arc::new(StubBridge::new())
         as Arc<dyn PythonBridge>));
@@ -237,6 +241,7 @@ async fn python_bridge_failure_emits_failed_event_and_returns_error() {
         chain, profile, eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     )
     .with_python_bridge(Some(Arc::new(FailingBridge)));
 

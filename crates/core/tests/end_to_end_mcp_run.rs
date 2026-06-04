@@ -161,7 +161,7 @@ async fn end_to_end_mcp_run_emits_full_audit_chain() {
         }],
     };
     let supervisor = Arc::new(
-        McpSupervisor::start_with_chain(cfg, &sup_log, &chain_path)
+        McpSupervisor::start_with_chain(cfg, &sup_log, &chain_path, tokio::sync::broadcast::channel(64).0)
             .await
             .expect("start supervisor"),
     );
@@ -186,6 +186,7 @@ async fn end_to_end_mcp_run_emits_full_audit_chain() {
             op_sup,
             op_runtime,
             operator_token_path,
+            tokio::sync::broadcast::channel(64).0,
         )
         .await
     });
@@ -319,7 +320,7 @@ async fn end_to_end_mcp_run_started_carries_domain_and_target() {
         }],
     };
     let supervisor = Arc::new(
-        McpSupervisor::start_with_chain(cfg, &sup_log, &chain_path)
+        McpSupervisor::start_with_chain(cfg, &sup_log, &chain_path, tokio::sync::broadcast::channel(64).0)
             .await
             .expect("start supervisor"),
     );
@@ -340,6 +341,7 @@ async fn end_to_end_mcp_run_started_carries_domain_and_target() {
             op_sup,
             op_runtime,
             operator_token_path,
+            tokio::sync::broadcast::channel(64).0,
         )
         .await
     });

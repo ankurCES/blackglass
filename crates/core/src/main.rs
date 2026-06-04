@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blackglass_audit::Chain;
+use blackglass_audit::{Chain, Event};
 use blackglass_core::broker::ConfirmationBroker;
 use blackglass_core::chokepoint::Chokepoint;
 use blackglass_core::gates::BrokerGate3;
@@ -99,6 +99,19 @@ async fn main() -> Result<()> {
             let channel = ConfirmChannel::new();
             let gate3: Arc<dyn blackglass_core::gates::Gate3> =
                 Arc::new(BrokerGate3::new_anonymous(broker.clone(), channel.clone()));
+            // Sub-plan 4 task 2.5.8: the operator-socket `audit.event`
+            // push channel. Every `chain.append` call in the chokepoint
+            // (and the MCP supervisor and the `mcp_run_tool` handler)
+            // routes through `audit_broadcast::append_and_broadcast`,
+            // which both writes to the chain AND best-effort sends on
+            // this broadcast. Subscribed operator clients receive
+            // each event as a `{"method":"audit.event",...}` push.
+            // The capacity (1024) is generous: each event is small
+            // (~200 bytes JSON), so 1024 is ~200KB of in-memory queue.
+            // Subscribers that lag get a `Lagged` error and we skip
+            // ahead — the chain is authoritative, so they can
+            // re-read via `audit.query`.
+            let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<Event>(1024);
             // Construct the Python sidecar bridge. Default is the in-process
             // stub; `--python-bridge=real` requires the `real` feature on
             // blackglass-python-bridge. `--python-bin` is accepted but the
@@ -128,6 +141,7 @@ async fn main() -> Result<()> {
                 eng,
                 gate3,
                 Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone())),
+                event_tx.clone(),
             )
             .with_evidence_dir(evidence_dir)
             .with_python_bridge(python_bridge_impl);
@@ -200,6 +214,7 @@ async fn main() -> Result<()> {
                 mcp_config,
                 &sup_log_path,
                 &sup_chain_path,
+                event_tx.clone(),
             )
             .await
             {
@@ -245,6 +260,7 @@ async fn main() -> Result<()> {
                     supervisor,
                     runtime_sock_path,
                     operator_token_path,
+                    event_tx,
                 )
                 .await
                 {

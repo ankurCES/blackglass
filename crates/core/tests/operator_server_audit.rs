@@ -29,7 +29,7 @@ use tokio::net::UnixStream;
 async fn noop_supervisor() -> Arc<McpSupervisor> {
     let cfg = McpSpawnConfig::default();
     let log = std::env::temp_dir().join("blackglass-noop-supervisor-audit.log");
-    Arc::new(McpSupervisor::start(cfg, &log).await.unwrap())
+    Arc::new(McpSupervisor::start(cfg, &log, tokio::sync::broadcast::channel(64).0).await.unwrap())
 }
 
 /// Write a deterministic token file at `<dir>/operator.token` with mode
@@ -56,7 +56,7 @@ async fn spawn_operator_with_chain_and_token(
     // Token must exist BEFORE the server starts so the `auth` route can
     // find it on every connection.
     let (_token_path, token) = write_token_file(dir);
-    let (sock_path, server) = spawn_operator_with_chain(dir).await;
+    let (sock_path, _event_tx, server) = spawn_operator_with_chain(dir).await;
     (sock_path, server, token)
 }
 
@@ -92,13 +92,30 @@ async fn connect_and_auth(sock_path: &PathBuf, token: &str) -> UnixStream {
     s
 }
 
+/// Read back the token written by `write_token_file` (trim trailing
+/// newline). Used by tests that call `spawn_operator_with_chain` directly
+/// (the `_and_token` variant returns it inline).
+fn read_token(dir: &tempfile::TempDir) -> String {
+    let p = dir.path().join("operator.token");
+    std::fs::read_to_string(&p)
+        .expect("token file should exist")
+        .trim()
+        .to_string()
+}
+
 /// Spawn a fresh operator server on a tempdir socket backed by a fresh
 /// audit chain at `<dir>/chain.jsonl`. The token file is expected to
 /// already exist (callers in this file use `write_token_file` before
-/// spawning). Returns the socket path and a handle to the server task.
+/// spawning). Returns the socket path, the broadcast sender the operator
+/// server subscribes to (so the test can inject live events), and a
+/// handle to the server task.
 async fn spawn_operator_with_chain(
     dir: &tempfile::TempDir,
-) -> (PathBuf, tokio::task::JoinHandle<std::io::Result<()>>) {
+) -> (
+    PathBuf,
+    tokio::sync::broadcast::Sender<Event>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
     let sock_path = dir.path().join("operator.sock");
     let chain_path = dir.path().join("chain.jsonl");
     let chain = Chain::open(&chain_path).expect("open empty chain");
@@ -107,8 +124,10 @@ async fn spawn_operator_with_chain(
     let supervisor = noop_supervisor().await;
     let runtime_sock = dir.path().join("runtime.sock");
     let token_path = dir.path().join("operator.token");
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(64);
     let server = tokio::spawn({
         let p = sock_path.clone();
+        let event_tx = event_tx.clone();
         async move {
             run(
                 &p,
@@ -118,6 +137,7 @@ async fn spawn_operator_with_chain(
                 supervisor,
                 runtime_sock,
                 token_path,
+                event_tx,
             )
             .await
         }
@@ -129,7 +149,7 @@ async fn spawn_operator_with_chain(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    (sock_path, server)
+    (sock_path, event_tx, server)
 }
 
 /// Send a single JSON-RPC call and read the next newline-terminated
@@ -280,7 +300,7 @@ async fn unauthenticated_client_cannot_call_audit_query() {
     // The token file exists (so `auth` could succeed) but the client
     // does not call `auth` first.
     let _ = write_token_file(&dir);
-    let (sock_path, server) = spawn_operator_with_chain(&dir).await;
+    let (sock_path, _event_tx, server) = spawn_operator_with_chain(&dir).await;
 
     let mut s = UnixStream::connect(&sock_path).await.unwrap();
     // Send audit.query WITHOUT auth first.
@@ -349,7 +369,7 @@ async fn auth_with_wrong_token_returns_error() {
     // Token file exists with a known-good token, but the client
     // presents a wrong one.
     let _ = write_token_file(&dir);
-    let (sock_path, server) = spawn_operator_with_chain(&dir).await;
+    let (sock_path, _event_tx, server) = spawn_operator_with_chain(&dir).await;
 
     let mut s = UnixStream::connect(&sock_path).await.unwrap();
     let req = json!({
@@ -372,6 +392,89 @@ async fn auth_with_wrong_token_returns_error() {
     assert_eq!(
         v["error"]["code"], -32002,
         "expected auth-failed (-32002), got: {v}"
+    );
+    drop(server);
+}
+
+// =============================================================================
+// Live-tail (`audit.event` push) — Task 2.5.7
+// =============================================================================
+
+/// The test owns the broadcast sender that the operator server subscribes
+/// to. After `subscribe` succeeds, sending an event through that sender
+/// must produce a server-pushed `audit.event` frame on the connection.
+///
+/// This proves the live-tail wiring end-to-end:
+///   test thread → broadcast::Sender → operator's subscribe task →
+///   connection write half → client read.
+#[tokio::test]
+async fn audit_event_push_reaches_subscribed_client() {
+    use tokio::io::BufReader;
+    let dir = tempdir().unwrap();
+    let _ = write_token_file(&dir);
+    let (sock_path, event_tx, server) = spawn_operator_with_chain(&dir).await;
+    let token = read_token(&dir);
+
+    // Connect + auth.
+    let mut s = connect_and_auth(&sock_path, &token).await;
+
+    // Subscribe to audit.event. Expect a one-line JSON-RPC result.
+    let resp = rpc_call(
+        &mut s,
+        "subscribe",
+        json!({ "channel": "audit.event" }),
+    )
+    .await;
+    assert!(
+        resp.get("error").is_none() || resp["error"].is_null(),
+        "subscribe should succeed, got: {resp}"
+    );
+    assert_eq!(resp["result"]["ok"], true, "subscribe result: {resp}");
+
+    // Publish a synthetic event through the broadcast channel the
+    // operator server is listening on. Use a recognisable server name
+    // so the assertion below can prove it's THIS event that came back.
+    let synthetic = Event {
+        seq: 0,
+        ts: "2026-06-03T00:00:00Z".to_string(),
+        prev_hash: String::new(),
+        kind: EventKind::McpServerSpawned {
+            server: "live-tail-sentinel".to_string(),
+            pid: 4242,
+        },
+        payload: json!({ "live_tail": true }),
+    };
+    // Receiver count must be ≥ 1 by the time we send (the operator
+    // server's subscribe task has already subscribed). If it isn't,
+    // the subscribe handler didn't actually attach a receiver.
+    assert!(
+        event_tx.receiver_count() >= 1,
+        "operator server should have ≥1 subscriber after subscribe, got {}",
+        event_tx.receiver_count()
+    );
+    event_tx.send(synthetic).expect("send should reach subscriber");
+
+    // Read the next line — it should be the pushed audit.event frame.
+    let mut reader = BufReader::new(&mut s);
+    let mut buf = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut buf))
+        .await
+        .expect("push should arrive within 2s")
+        .expect("push read should not error");
+    let v: serde_json::Value = serde_json::from_str(buf.trim())
+        .unwrap_or_else(|e| panic!("push frame should be JSON, got `{buf}`: {e}"));
+    assert_eq!(v["method"], "audit.event", "push method: {v}");
+    assert_eq!(
+        v["params"]["event"]["server"], "live-tail-sentinel",
+        "pushed event should carry our synthetic server name: {v}"
+    );
+    assert_eq!(
+        v["params"]["event"]["pid"], 4242,
+        "pushed event should carry our synthetic pid: {v}"
+    );
+    assert_eq!(
+        v["params"]["event"]["kind"], "mcp_server_spawned",
+        "pushed event should carry the right kind tag: {v}"
     );
     drop(server);
 }

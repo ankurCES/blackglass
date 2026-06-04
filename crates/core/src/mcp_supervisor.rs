@@ -10,6 +10,7 @@
 //! The supervisor exposes a `status(name) -> Option<ChildStatus>`
 //! method for the Tauri app to query liveness.
 
+use crate::audit_broadcast;
 use crate::mcp_spawn_config::{McpServerSpec, McpSpawnConfig};
 use blackglass_audit::{Chain, Event, EventKind};
 use serde_json::json;
@@ -80,20 +81,25 @@ impl McpSupervisor {
     /// Start the supervisor. Spawns all child processes; returns once
     /// they're all spawned (or failed to spawn). The audit chain is
     /// opened at `<log_path parent>/chain.jsonl`.
-    pub async fn start(config: McpSpawnConfig, log_path: &Path) -> Result<Self, SupervisorError> {
+    pub async fn start(
+        config: McpSpawnConfig,
+        log_path: &Path,
+        event_tx: broadcast::Sender<Event>,
+    ) -> Result<Self, SupervisorError> {
         // The plan's 2-arg constructor derives the chain from
         // `log_path.parent()`. That's fragile in the abstract but
         // workable for the test (and for the production startup path,
         // where `log_path` and `chain_path` live in the same state dir).
         // Keep it for parity with the plan.
         let chain_path = log_path.parent().unwrap().join("chain.jsonl");
-        Self::start_with_chain(config, log_path, &chain_path).await
+        Self::start_with_chain(config, log_path, &chain_path, event_tx).await
     }
 
     pub async fn start_with_chain(
         config: McpSpawnConfig,
         log_path: &Path,
         chain_path: &Path,
+        event_tx: broadcast::Sender<Event>,
     ) -> Result<Self, SupervisorError> {
         let chain = Arc::new(Mutex::new(Chain::open(chain_path)?));
         let inner: Arc<RwLock<HashMap<String, ChildHandle>>> =
@@ -108,16 +114,24 @@ impl McpSupervisor {
         for spec in config.servers.iter() {
             let child = Self::spawn_child(spec, log_path).await?;
             let pid = child.id().unwrap_or(0);
-            chain.lock().unwrap().append(Event {
-                seq: 0, // Chain::append overwrites this from its internal counter.
-                ts: chrono::Utc::now().to_rfc3339(),
-                prev_hash: String::new(), // empty → Chain::append fills it from `self.last`
-                kind: EventKind::McpServerSpawned {
-                    server: spec.name.clone(),
-                    pid,
-                },
-                payload: json!({}),
-            })?;
+            // `append_and_broadcast` locks the chain briefly; the
+            // outer code (the spawn loop) doesn't hold a lock here.
+            {
+                let ev = Event {
+                    seq: 0, // Chain::append overwrites this from its internal counter.
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    prev_hash: String::new(), // empty → Chain::append fills it from `self.last`
+                    kind: EventKind::McpServerSpawned {
+                        server: spec.name.clone(),
+                        pid,
+                    },
+                    payload: json!({}),
+                };
+                let mut guard = chain.lock().unwrap();
+                if let Err(e) = audit_broadcast::append_and_broadcast(&mut guard, &event_tx, ev) {
+                    eprintln!("mcp_supervisor: audit append failed: {e}");
+                }
+            }
             inner.write().await.insert(
                 spec.name.clone(),
                 ChildHandle {
@@ -132,6 +146,7 @@ impl McpSupervisor {
             // Spawn the monitor task for this child.
             let inner_for_task = inner.clone();
             let chain_for_task = chain.clone();
+            let event_tx_for_task = event_tx.clone();
             let spec_for_task = spec.clone();
             let mut shutdown_rx_for_task = shutdown_tx.subscribe();
             tokio::spawn(async move {
@@ -139,6 +154,7 @@ impl McpSupervisor {
                     spec_for_task,
                     inner_for_task,
                     chain_for_task,
+                    event_tx_for_task,
                     &mut shutdown_rx_for_task,
                 )
                 .await;
@@ -173,6 +189,7 @@ impl McpSupervisor {
         spec: McpServerSpec,
         inner: Arc<RwLock<HashMap<String, ChildHandle>>>,
         chain: Arc<Mutex<Chain>>,
+        event_tx: broadcast::Sender<Event>,
         shutdown_rx: &mut broadcast::Receiver<()>,
     ) {
         let backoffs = [1u64, 2, 4, 8, 16];
@@ -208,7 +225,15 @@ impl McpSupervisor {
                         let guard = inner.read().await;
                         guard.get(&spec.name).map(|h| h.restart_count).unwrap_or(0)
                     };
-                    chain.lock().unwrap().append(Event {
+                    // Emit McpServerExited via `append_and_broadcast`
+                    // so the operator's `audit.event` push channel is
+                    // fed (the legacy direct `chain.append` would skip
+                    // the broadcast). The previous `chain.append` was
+                    // fire-and-forget (`.ok()`) — we keep the same
+                    // failure-tolerant semantics here, and we move the
+                    // Event construction outside the closure so the
+                    // helper can take it by value.
+                    let ev = Event {
                         seq: 0, // Chain::append overwrites this from its internal counter.
                         ts: chrono::Utc::now().to_rfc3339(),
                         prev_hash: String::new(), // empty → Chain::append fills it
@@ -218,7 +243,12 @@ impl McpSupervisor {
                             restart_count: current_count,
                         },
                         payload: json!({}),
-                    }).ok();
+                    };
+                    let _ = audit_broadcast::append_and_broadcast(
+                        &mut chain.lock().unwrap(),
+                        &event_tx,
+                        ev,
+                    );
                     if current_count >= max_restarts {
                         // Give up.
                         let mut guard = inner.write().await;
@@ -250,7 +280,12 @@ impl McpSupervisor {
                     match Self::spawn_child(&spec, &log_path).await {
                         Ok(new_child) => {
                             let pid = new_child.id().unwrap_or(0);
-                            chain.lock().unwrap().append(Event {
+                            // Re-spawn: emit `McpServerSpawned` via
+                            // `append_and_broadcast` so the operator's
+                            // `audit.event` push channel is fed. The
+                            // chain is the source of truth; the
+                            // broadcast is best-effort.
+                            let ev = Event {
                                 seq: 0, // Chain::append overwrites this from its internal counter.
                                 ts: chrono::Utc::now().to_rfc3339(),
                                 prev_hash: String::new(),
@@ -259,7 +294,12 @@ impl McpSupervisor {
                                     pid,
                                 },
                                 payload: json!({}),
-                            }).ok();
+                            };
+                            let _ = audit_broadcast::append_and_broadcast(
+                                &mut chain.lock().unwrap(),
+                                &event_tx,
+                                ev,
+                            );
                             let mut guard = inner.write().await;
                             if let Some(h) = guard.get_mut(&spec.name) {
                                 h.child = Some(new_child);

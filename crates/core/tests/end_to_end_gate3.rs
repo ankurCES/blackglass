@@ -100,7 +100,7 @@ async fn destructive_action_requires_operator_allow() {
     // Sanitizer: not exercised meaningfully here (no real output), but
     // must exist as a Gate 4 to satisfy Chokepoint::new.
     let gate4: Arc<dyn Gate4> = Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone()));
-    let cp = Chokepoint::new(chain, profile, eng, gate3, gate4).with_evidence_dir(evidence_dir);
+    let cp = Chokepoint::new(chain, profile, eng, gate3, gate4, tokio::sync::broadcast::channel(64).0).with_evidence_dir(evidence_dir);
     let server = Server::bind(&runtime_sock, "tok".into(), cp).await.unwrap();
 
     // --- act: start both servers in the background -----------------------
@@ -125,6 +125,7 @@ async fn destructive_action_requires_operator_allow() {
         McpSpawnConfig::default(),
         &sup_log,
         &sup_chain,
+        tokio::sync::broadcast::channel(64).0,
     )
     .await
     .expect("start placeholder supervisor");
@@ -144,6 +145,7 @@ async fn destructive_action_requires_operator_allow() {
                 op_sup,
                 op_runtime_sock,
                 op_token_path,
+                tokio::sync::broadcast::channel(64).0,
             ),
         )
         .await;
@@ -302,7 +304,7 @@ async fn destructive_action_can_be_denied_by_operator() {
     let channel = ConfirmChannel::new();
     let gate3: Arc<dyn Gate3> = Arc::new(BrokerGate3::new(broker.clone(), channel.clone(), "osint", "smoke"));
     let gate4: Arc<dyn Gate4> = Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone()));
-    let cp = Chokepoint::new(chain, profile, eng, gate3, gate4).with_evidence_dir(evidence_dir);
+    let cp = Chokepoint::new(chain, profile, eng, gate3, gate4, tokio::sync::broadcast::channel(64).0).with_evidence_dir(evidence_dir);
     let server = Server::bind(&runtime_sock, "tok".into(), cp).await.unwrap();
 
     let server_handle = tokio::spawn(async move {
@@ -325,6 +327,7 @@ async fn destructive_action_can_be_denied_by_operator() {
         McpSpawnConfig::default(),
         &sup_log,
         &sup_chain,
+        tokio::sync::broadcast::channel(64).0,
     )
     .await
     .expect("start placeholder supervisor");
@@ -343,6 +346,7 @@ async fn destructive_action_can_be_denied_by_operator() {
                 op_sup,
                 op_runtime_sock,
                 op_token_path,
+                tokio::sync::broadcast::channel(64).0,
             ),
         )
         .await;

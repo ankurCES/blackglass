@@ -21,6 +21,7 @@
 //! (per JSON-RPC 2.0 §6) so a UI can distinguish "transport /
 //! parameter / server" errors from "app" errors.
 
+use crate::audit_broadcast;
 use crate::mcp_supervisor::{ChildStatus, McpSupervisor};
 use crate::rpc::{Method, RpcRequest, RpcResponse};
 use blackglass_audit::{Chain, Event, EventKind};
@@ -32,6 +33,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
+use tokio::sync::broadcast;
 
 #[derive(Debug, Error)]
 pub enum McpRunError {
@@ -110,6 +112,7 @@ pub async fn handle_mcp_run_tool(
     supervisor: &McpSupervisor,
     runtime_sock_path: &Path,
     chain: &Mutex<Chain>,
+    event_tx: &broadcast::Sender<Event>,
 ) -> Result<McpRunResult, McpRunError> {
     let mcp_name = mcp_for_domain(&params.domain)
         .ok_or_else(|| McpRunError::UnknownDomain(params.domain.clone()))?;
@@ -127,7 +130,7 @@ pub async fn handle_mcp_run_tool(
     // this one and carries the ok/ms fields. If the forward fails
     // (Timeout / Io / McpError) we still emit Completed with
     // `ok=false` and the elapsed ms.
-    append_audit(chain, EventKind::McpRunStarted {
+    append_audit(chain, event_tx, EventKind::McpRunStarted {
         domain: params.domain.clone(),
         target: params.target.clone(),
     });
@@ -158,16 +161,16 @@ pub async fn handle_mcp_run_tool(
         Ok(s) => s,
         Err(e) => {
             // Emit Completed with the failure and return.
-            emit_completed(chain, &params, false, started);
+            emit_completed(chain, event_tx, &params, false, started);
             return Err(McpRunError::Io(e));
         }
     };
     if let Err(e) = stream.write_all(&encode_frame(&req_bytes)).await {
-        emit_completed(chain, &params, false, started);
+        emit_completed(chain, event_tx, &params, false, started);
         return Err(McpRunError::Io(e));
     }
     if let Err(e) = stream.flush().await {
-        emit_completed(chain, &params, false, started);
+        emit_completed(chain, event_tx, &params, false, started);
         return Err(McpRunError::Io(e));
     }
 
@@ -202,18 +205,18 @@ pub async fn handle_mcp_run_tool(
     let payload = match tokio::time::timeout(dur, read_fut).await {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            emit_completed(chain, &params, false, started);
+            emit_completed(chain, event_tx, &params, false, started);
             return Err(McpRunError::Io(e));
         }
         Err(_) => {
-            emit_completed(chain, &params, false, started);
+            emit_completed(chain, event_tx, &params, false, started);
             return Err(McpRunError::Timeout(mcp_name.into(), dur_ms));
         }
     };
     let resp: RpcResponse = match serde_json::from_slice(&payload) {
         Ok(r) => r,
         Err(e) => {
-            emit_completed(chain, &params, false, started);
+            emit_completed(chain, event_tx, &params, false, started);
             return Err(McpRunError::Json(e));
         }
     };
@@ -223,7 +226,7 @@ pub async fn handle_mcp_run_tool(
         // and "gate denied: ..." — those flow through verbatim to the
         // operator's `error.message`, and the test asserts the substring
         // "denied" / "gate" is present.
-        emit_completed(chain, &params, false, started);
+        emit_completed(chain, event_tx, &params, false, started);
         return Err(McpRunError::McpError(mcp_name.into(), err));
     }
     if !resp.ok {
@@ -231,7 +234,7 @@ pub async fn handle_mcp_run_tool(
         // possible if the runtime synthesized an error response that
         // didn't populate the `error` field. Surface a synthetic message
         // so the operator always has something to display.
-        emit_completed(chain, &params, false, started);
+        emit_completed(chain, event_tx, &params, false, started);
         return Err(McpRunError::McpError(
             mcp_name.into(),
             "runtime returned ok=false with no error message".to_string(),
@@ -255,15 +258,21 @@ pub async fn handle_mcp_run_tool(
     // Audit: emit `McpRunCompleted` on the success path. We always
     // pair it with the `McpRunStarted` from above so the audit
     // reader can correlate the two events by (domain, target).
-    emit_completed(chain, &params, res.ok, started);
+    emit_completed(chain, event_tx, &params, res.ok, started);
     Ok(res)
 }
 
-/// Append a `McpRunStarted` / `McpRunCompleted` event to the audit
-/// chain. Failures here are logged and swallowed — auditing must
-/// never block a runtime path. (The `Chain` is wrapped in a `Mutex`
-/// because `Chain::append` takes `&mut self`; we lock briefly.)
-fn append_audit(chain: &Mutex<Chain>, kind: EventKind) {
+/// Append an audit event to the chain AND broadcast it to any
+/// operator-socket subscribers. Failures here are logged and
+/// swallowed — auditing must never block a runtime path. (The
+/// `Chain` is wrapped in a `Mutex` because `Chain::append` takes
+/// `&mut self`; we lock briefly, then call `append_and_broadcast`
+/// which itself appends + sends on the broadcast channel.)
+fn append_audit(
+    chain: &Mutex<Chain>,
+    event_tx: &broadcast::Sender<Event>,
+    kind: EventKind,
+) {
     let ev = Event {
         seq: 0, // Chain::append overwrites this from its internal counter
         ts: chrono::Utc::now().to_rfc3339(),
@@ -271,14 +280,27 @@ fn append_audit(chain: &Mutex<Chain>, kind: EventKind) {
         kind,
         payload: serde_json::json!({}),
     };
-    if let Err(e) = chain.lock().expect("audit chain mutex poisoned").append(ev) {
+    let mut guard = match chain.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("mcp_run_tool: audit chain mutex poisoned: {e}");
+            return;
+        }
+    };
+    if let Err(e) = audit_broadcast::append_and_broadcast(&mut guard, event_tx, ev) {
         eprintln!("mcp_run_tool: audit append failed: {e}");
     }
 }
 
-fn emit_completed(chain: &Mutex<Chain>, params: &McpRunParams, ok: bool, started: Instant) {
+fn emit_completed(
+    chain: &Mutex<Chain>,
+    event_tx: &broadcast::Sender<Event>,
+    params: &McpRunParams,
+    ok: bool,
+    started: Instant,
+) {
     let ms = started.elapsed().as_millis() as u64;
-    append_audit(chain, EventKind::McpRunCompleted {
+    append_audit(chain, event_tx, EventKind::McpRunCompleted {
         domain: params.domain.clone(),
         target: params.target.clone(),
         ok,

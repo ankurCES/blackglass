@@ -15,7 +15,7 @@ use tokio::net::UnixStream;
 async fn noop_supervisor() -> Arc<McpSupervisor> {
     let cfg = McpSpawnConfig::default();
     let log = std::env::temp_dir().join("blackglass-noop-supervisor.log");
-    Arc::new(McpSupervisor::start(cfg, &log).await.unwrap())
+    Arc::new(McpSupervisor::start(cfg, &log, tokio::sync::broadcast::channel(64).0).await.unwrap())
 }
 
 /// Write a 0600 token file at `<dir>/operator.token` containing
@@ -80,7 +80,7 @@ async fn accepts_connections_and_survives_malformed_input() {
 
     let server = tokio::spawn({
         let p = sock_path.clone();
-        async move { run(&p, broker, channel, chain, supervisor, runtime_sock, token_path).await }
+        async move { run(&p, broker, channel, chain, supervisor, runtime_sock, token_path, tokio::sync::broadcast::channel(64).0).await }
     });
 
     for _ in 0..50 {
@@ -142,7 +142,7 @@ async fn channel_push_forwards_to_connected_client() {
     let server = tokio::spawn({
         let p = sock_path.clone();
         let c = channel.clone();
-        async move { run(&p, broker, c, chain, supervisor, runtime_sock, token_path).await }
+        async move { run(&p, broker, c, chain, supervisor, runtime_sock, token_path, tokio::sync::broadcast::channel(64).0).await }
     });
 
     for _ in 0..50 {

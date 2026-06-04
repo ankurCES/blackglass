@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 
@@ -15,7 +16,12 @@ use crate::broker::{ConfirmationBroker, Decision};
 use crate::mcp_run_tool;
 use crate::mcp_supervisor::McpSupervisor;
 use crate::operator_auth::OperatorAuth;
-use blackglass_audit::Chain;
+use blackglass_audit::{Chain, Event};
+
+/// Type alias for the per-connection write half. The read loop and
+/// every push/subscribe task hold a clone of this `Arc<Mutex<...>>`
+/// so they can write to the same `OwnedWriteHalf` without races.
+type ConnWrite = Arc<tokio::sync::Mutex<OwnedWriteHalf>>;
 
 /// A `confirm.request` event to be pushed to a connected operator.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -67,6 +73,7 @@ pub async fn run(
     supervisor: Arc<McpSupervisor>,
     runtime_sock_path: PathBuf,
     operator_token_path: PathBuf,
+    event_tx: broadcast::Sender<Event>,
 ) -> std::io::Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -85,6 +92,7 @@ pub async fn run(
         let supervisor = supervisor.clone();
         let runtime_sock_path = runtime_sock_path.clone();
         let operator_token_path = operator_token_path.clone();
+        let event_tx = event_tx.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(
                 stream,
@@ -94,6 +102,7 @@ pub async fn run(
                 supervisor,
                 runtime_sock_path,
                 operator_token_path,
+                event_tx,
             )
             .await
             {
@@ -111,13 +120,15 @@ async fn handle(
     supervisor: Arc<McpSupervisor>,
     runtime_sock_path: PathBuf,
     operator_token_path: PathBuf,
+    event_tx: broadcast::Sender<Event>,
 ) -> std::io::Result<()> {
     let (read, write) = stream.into_split();
-    // The write half is shared between two tasks:
+    // The write half is shared between tasks:
     //   - the read loop, which writes JSON-RPC responses to client RPCs
     //   - the push task, which writes server-pushed `confirm.request` events
-    // We wrap it in an Arc<Mutex<...>> so both can write without races.
-    let write = Arc::new(tokio::sync::Mutex::new(write));
+    //   - the subscribe task(s), which write `audit.event` pushes
+    // We wrap it in an `Arc<Mutex<...>>` so all of them can write without races.
+    let write: ConnWrite = Arc::new(tokio::sync::Mutex::new(write));
     let mut lines = BufReader::new(read).lines();
     let mut events = channel.subscribe();
 
@@ -173,6 +184,8 @@ async fn handle(
                     runtime_sock_path.clone(),
                     operator_token_path.clone(),
                     &authenticated,
+                    &event_tx,
+                    &write,
                 )
                 .await
             }
@@ -198,6 +211,8 @@ async fn handle_rpc(
     runtime_sock_path: PathBuf,
     operator_token_path: PathBuf,
     authenticated: &AtomicBool,
+    event_tx: &broadcast::Sender<Event>,
+    write: &ConnWrite,
 ) -> Option<String> {
     let id = v.get("id").cloned();
     let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -261,7 +276,7 @@ async fn handle_rpc(
             Err(e) => Some(jsonrpc_error(id, -32603, &format!("audit: {e}"))),
         },
         "mcp_run_tool" => match serde_json::from_value::<mcp_run_tool::McpRunParams>(params) {
-            Ok(p) => match mcp_run_tool::handle_mcp_run_tool(p, supervisor, &runtime_sock_path, chain).await {
+            Ok(p) => match mcp_run_tool::handle_mcp_run_tool(p, supervisor, &runtime_sock_path, chain, event_tx).await {
                 Ok(resp) => match serde_json::to_value(&resp) {
                     Ok(v) => Some(jsonrpc_ok(id, v)),
                     Err(e) => Some(jsonrpc_error(id, -32603, &format!("serialize: {e}"))),
@@ -299,8 +314,82 @@ async fn handle_rpc(
             },
             Err(e) => Some(jsonrpc_error(id, -32602, &format!("invalid params: {e}"))),
         },
+        "subscribe" => handle_subscribe(id, params, event_tx, write),
         _ => Some(jsonrpc_error(id, -32601, "method not found")),
     }
+}
+
+/// Handle the `subscribe` method. The only channel we currently
+/// support is `audit.event` — the live tail of all `chain.append`
+/// events. On a valid `{"channel":"audit.event"}` request, we
+/// subscribe a fresh per-connection task to the broadcast channel
+/// and respond with `{"ok":true}`. From that point on, every event
+/// appended via `audit_broadcast::append_and_broadcast` is pushed
+/// to the client as a `{"jsonrpc":"2.0","method":"audit.event",
+/// "params":{"event": <Event>}}` newline-terminated frame.
+///
+/// The task is detached (`tokio::spawn`) — it lives for the
+/// connection's lifetime. When the client disconnects, the next
+/// `write_all` fails, the task breaks out of the loop, and the
+/// `Receiver` is dropped. The broadcast channel itself is shared
+/// with all other connections and with the chokepoint / supervisor
+/// emitters; the per-connection receiver is the only thing that
+/// dies on disconnect.
+///
+/// Failure modes:
+///   -32602 — invalid `params` shape (missing `channel`, wrong type)
+///   -32602 — unknown channel name (e.g. "logs", "events")
+fn handle_subscribe(
+    id: Option<serde_json::Value>,
+    params: serde_json::Value,
+    event_tx: &broadcast::Sender<Event>,
+    write: &ConnWrite,
+) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct SubscribeParams {
+        channel: String,
+    }
+    let p: SubscribeParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(e) => {
+            return Some(jsonrpc_error(id, -32602, &format!("invalid params: {e}")));
+        }
+    };
+    if p.channel != "audit.event" {
+        return Some(jsonrpc_error(
+            id,
+            -32602,
+            &format!("unknown channel `{}`", p.channel),
+        ));
+    }
+    let mut rx = event_tx.subscribe();
+    let write = write.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let frame = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "audit.event",
+                        "params": { "event": event },
+                    });
+                    let mut w = write.lock().await;
+                    if w.write_all(frame.to_string().as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if w.write_all(b"\n").await.is_err() {
+                        break;
+                    }
+                    if w.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    Some(jsonrpc_ok(id, serde_json::json!({"ok": true})))
 }
 
 /// Handle the `auth` method: verify the presented token against the

@@ -18,6 +18,7 @@ fn setup() -> (Chokepoint, tempfile::TempDir) {
         chain, profile, eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     );
     (cp, dir)
 }
@@ -66,6 +67,7 @@ async fn gate3_denial_is_logged_and_propagated() {
         chain, profile, eng,
         Arc::new(DenyAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     );
     let err = execute_action(&mut cp, ActionRequest {
         domain: "osint".into(), action_class: "read_only".into(),
@@ -100,6 +102,7 @@ async fn audit_log_verifies_after_real_run() {
         chain, profile, eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(AllowAll) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     );
     for _ in 0..3 {
         let _ = execute_action(&mut cp, ActionRequest {
@@ -141,6 +144,7 @@ async fn pi_detection_emits_audit_event_and_writes_evidence() {
         chain, Profile::analyst_default(), eng,
         Arc::new(AllowAll) as Arc<dyn Gate3>,
         Arc::new(PiGate) as Arc<dyn Gate4>,
+        tokio::sync::broadcast::channel(64).0,
     ).with_evidence_dir(evidence_dir.clone());
 
     let _ = execute_action(&mut cp, ActionRequest {

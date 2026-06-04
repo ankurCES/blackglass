@@ -144,7 +144,7 @@ async fn spawn_test_core_with_behavior(
             max_restarts: 100, // keep restarting forever so the test sees Restarting, not GivenUp
         }],
     };
-    let supervisor = McpSupervisor::start_with_chain(cfg, &sup_log, &chain_path)
+    let supervisor = McpSupervisor::start_with_chain(cfg, &sup_log, &chain_path, tokio::sync::broadcast::channel(64).0)
         .await
         .expect("supervisor start");
     // Wrap the supervisor in an Arc so we can hand a clone to the
@@ -296,6 +296,7 @@ async fn spawn_test_core_with_behavior(
             op_sup,
             rt_sock_for_op,
             op_token_path,
+            tokio::sync::broadcast::channel(64).0,
         )
         .await;
     });
