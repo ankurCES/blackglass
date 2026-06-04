@@ -4,6 +4,7 @@
 //! §2.4 + §6.2.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -13,6 +14,7 @@ use crate::audit_query;
 use crate::broker::{ConfirmationBroker, Decision};
 use crate::mcp_run_tool;
 use crate::mcp_supervisor::McpSupervisor;
+use crate::operator_auth::OperatorAuth;
 use blackglass_audit::Chain;
 
 /// A `confirm.request` event to be pushed to a connected operator.
@@ -64,6 +66,7 @@ pub async fn run(
     chain: Arc<Mutex<Chain>>,
     supervisor: Arc<McpSupervisor>,
     runtime_sock_path: PathBuf,
+    operator_token_path: PathBuf,
 ) -> std::io::Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -81,8 +84,19 @@ pub async fn run(
         let chain = chain.clone();
         let supervisor = supervisor.clone();
         let runtime_sock_path = runtime_sock_path.clone();
+        let operator_token_path = operator_token_path.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, broker, channel, chain, supervisor, runtime_sock_path).await {
+            if let Err(e) = handle(
+                stream,
+                broker,
+                channel,
+                chain,
+                supervisor,
+                runtime_sock_path,
+                operator_token_path,
+            )
+            .await
+            {
                 eprintln!("operator socket handler error: {e}");
             }
         });
@@ -96,6 +110,7 @@ async fn handle(
     chain: Arc<Mutex<Chain>>,
     supervisor: Arc<McpSupervisor>,
     runtime_sock_path: PathBuf,
+    operator_token_path: PathBuf,
 ) -> std::io::Result<()> {
     let (read, write) = stream.into_split();
     // The write half is shared between two tasks:
@@ -105,6 +120,14 @@ async fn handle(
     let write = Arc::new(tokio::sync::Mutex::new(write));
     let mut lines = BufReader::new(read).lines();
     let mut events = channel.subscribe();
+
+    // Per-connection auth state. Every method (other than `auth` itself)
+    // is gated on this being `true`. Set by the `auth` method on a
+    // successful `OperatorAuth::verify`. Lives for the lifetime of the
+    // connection; the connection itself is dropped when the client
+    // disconnects (or the operator server stops), which clears the flag
+    // automatically.
+    let authenticated = Arc::new(AtomicBool::new(false));
 
     // Forward server-pushed `confirm.request` notifications to the client.
     // The Tauri shell filters on `method == "confirm.request"`.
@@ -142,7 +165,16 @@ async fn handle(
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
         let resp = match parsed {
             Ok(v) => {
-                handle_rpc(v, &broker, &chain, &supervisor, runtime_sock_path.clone()).await
+                handle_rpc(
+                    v,
+                    &broker,
+                    &chain,
+                    &supervisor,
+                    runtime_sock_path.clone(),
+                    operator_token_path.clone(),
+                    &authenticated,
+                )
+                .await
             }
             Err(_) => Some(jsonrpc_error(None, -32700, "parse error")),
         };
@@ -164,10 +196,35 @@ async fn handle_rpc(
     chain: &Mutex<Chain>,
     supervisor: &Arc<McpSupervisor>,
     runtime_sock_path: PathBuf,
+    operator_token_path: PathBuf,
+    authenticated: &AtomicBool,
 ) -> Option<String> {
     let id = v.get("id").cloned();
     let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = v.get("params").cloned().unwrap_or(serde_json::json!({}));
+
+    // Auth gate (Task 2.5.7): every method *except* `auth` itself
+    // requires a successful prior `auth` call on this connection.
+    // The 7-arg signature is a deliberate deviation from the plan's
+    // "state struct" wrapper — see the plan's amendment §2.5.7.
+    //
+    // The `auth` method is special: it both reads from and sets the
+    // `authenticated` flag, so it's handled inline before the gate.
+    if method == "auth" {
+        return handle_auth(
+            id,
+            params,
+            &operator_token_path,
+            authenticated,
+        );
+    }
+    if !authenticated.load(Ordering::Relaxed) {
+        return Some(jsonrpc_error(
+            id,
+            -32001,
+            "auth required: call `auth` first",
+        ));
+    }
 
     match method {
         "ping" => Some(jsonrpc_ok(id, serde_json::json!("pong"))),
@@ -189,11 +246,6 @@ async fn handle_rpc(
             let _ = result;
             Some(jsonrpc_ok(id, serde_json::json!({ "resolved": true })))
         }
-        // TODO: gate on auth in 2.5.7 — these two methods are currently
-        // reachable by any connected client. The auth flow will require
-        // the client to complete `auth` first; we will then return
-        // JSON-RPC error code -32001 for every other method until the
-        // client has authenticated.
         "audit.query" => match serde_json::from_value::<audit_query::QueryParams>(params) {
             Ok(p) => match audit_query::handle_query(chain, p) {
                 Ok(resp) => match serde_json::to_value(&resp) {
@@ -248,6 +300,44 @@ async fn handle_rpc(
             Err(e) => Some(jsonrpc_error(id, -32602, &format!("invalid params: {e}"))),
         },
         _ => Some(jsonrpc_error(id, -32601, "method not found")),
+    }
+}
+
+/// Handle the `auth` method: verify the presented token against the
+/// token file on disk, and on success flip the per-connection
+/// `authenticated` flag so subsequent calls bypass the -32001 gate.
+///
+/// Wire format:
+/// ```json
+/// {"jsonrpc":"2.0","id":N,"method":"auth","params":{"token":"<the-literal-token>"}}
+/// ```
+/// The token on disk is `\n`-terminated (see `OperatorAuth::verify` and
+/// the 2.5.2 tests), so the caller sends the *literal* token bytes (no
+/// trailing newline) and we append `\n` here before delegating to
+/// `OperatorAuth::verify` — which is what the file actually contains.
+///
+/// Error codes:
+///   -32002 — auth failed (token mismatch, file missing/loose perms, etc.)
+fn handle_auth(
+    id: Option<serde_json::Value>,
+    params: serde_json::Value,
+    operator_token_path: &Path,
+    authenticated: &AtomicBool,
+) -> Option<String> {
+    let presented = params
+        .get("token")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    // Add the trailing newline that the on-disk file carries.
+    let mut presented_with_nl = presented.as_bytes().to_vec();
+    presented_with_nl.push(b'\n');
+    let auth = OperatorAuth::new(operator_token_path);
+    match auth.verify(&presented_with_nl) {
+        Ok(()) => {
+            authenticated.store(true, Ordering::Relaxed);
+            Some(jsonrpc_ok(id, serde_json::json!({ "ok": true })))
+        }
+        Err(e) => Some(jsonrpc_error(id, -32002, &e.to_string())),
     }
 }
 

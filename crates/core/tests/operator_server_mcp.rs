@@ -45,7 +45,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
@@ -88,6 +88,10 @@ struct TestCore {
     _operator_task: tokio::task::JoinHandle<()>,
     _stub_task: tokio::task::JoinHandle<()>,
     _stop_stub: Arc<Notify>,
+    /// Token string for the `auth` handshake. Tests that make
+    /// JSON-RPC calls use it via `connect_and_auth(&self.operator_sock,
+    /// &self.token)`.
+    token: String,
 }
 
 impl Drop for TestCore {
@@ -278,6 +282,11 @@ async fn spawn_test_core_with_behavior(
     let op_sup = supervisor.clone();
     let op_broker = broker.clone();
     let op_channel = channel.clone();
+    // Auth (Task 2.5.7): write the 0600 token file before starting
+    // the operator server, then pass its path as the 7th arg.
+    let token_path = dir.path().join("operator.token");
+    let token = write_token_file(&dir);
+    let op_token_path = token_path.clone();
     let operator_task = tokio::spawn(async move {
         let _ = run_operator(
             &op_sock,
@@ -286,6 +295,7 @@ async fn spawn_test_core_with_behavior(
             op_chain,
             op_sup,
             rt_sock_for_op,
+            op_token_path,
         )
         .await;
     });
@@ -308,12 +318,58 @@ async fn spawn_test_core_with_behavior(
         _operator_task: operator_task,
         _stub_task: stub_task,
         _stop_stub: stop_stub,
+        token,
     }
 }
 
 // ===========================================================================
 // JSON-RPC client helpers (operator.sock is line-delimited JSON-RPC)
 // ===========================================================================
+
+/// Write a 0600 token file at `<dir>/operator.token` with the
+/// test token and return the token string. The token must exist
+/// before the operator server starts so the `auth` route can find it.
+const TEST_TOKEN: &str = "operator-test-token-mcp";
+fn write_token_file(dir: &tempfile::TempDir) -> String {
+    let path = dir.path().join("operator.token");
+    std::fs::write(&path, format!("{TEST_TOKEN}\n")).unwrap();
+    std::fs::set_permissions(
+        &path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    TEST_TOKEN.to_string()
+}
+
+/// Connect to the operator socket and complete the `auth` handshake.
+/// Returns the connected `UnixStream` (the caller re-wraps it as
+/// needed for further `rpc_call`s).
+async fn connect_and_auth(sock_path: &std::path::Path, token: &str) -> UnixStream {
+    let mut s = UnixStream::connect(sock_path).await.expect("connect operator.sock");
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "auth",
+        "params": { "token": token },
+    });
+    let mut line = req.to_string();
+    line.push('\n');
+    s.write_all(line.as_bytes()).await.expect("write auth");
+    s.flush().await.expect("flush auth");
+    let mut reader = tokio::io::BufReader::new(&mut s);
+    let mut buf = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut buf))
+        .await
+        .expect("server should respond to auth within 2s")
+        .expect("auth read should not error");
+    let v: serde_json::Value =
+        serde_json::from_str(buf.trim()).expect("auth response should be JSON");
+    assert!(
+        v.get("error").is_none() || v["error"].is_null(),
+        "auth should succeed in connect_and_auth, got: {v}"
+    );
+    s
+}
 
 async fn rpc_call(
     sock: &mut UnixStream,
@@ -350,7 +406,7 @@ async fn rpc_call(
 #[tokio::test]
 async fn mcp_run_tool_returns_ok_when_mcp_allows() {
     let core = spawn_test_core(ServerKind::Sleeper).await;
-    let mut s = UnixStream::connect(&core.operator_sock).await.unwrap();
+    let mut s = connect_and_auth(&core.operator_sock, &core.token).await;
     let resp = rpc_call(
         &mut s,
         1,
@@ -387,7 +443,7 @@ async fn mcp_run_tool_returns_denied_when_chokepoint_denies() {
         StubBehavior::Denied("gate denied: policy violation".to_string()),
     )
     .await;
-    let mut s = UnixStream::connect(&core.operator_sock).await.unwrap();
+    let mut s = connect_and_auth(&core.operator_sock, &core.token).await;
     let resp = rpc_call(
         &mut s,
         1,
@@ -428,7 +484,7 @@ async fn mcp_run_tool_returns_error_when_mcp_server_is_down() {
     // supervisor to have transitioned to `Restarting`. The first
     // backoff is 1s, so we wait 1.5s to be safe.
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let mut s = UnixStream::connect(&core.operator_sock).await.unwrap();
+    let mut s = connect_and_auth(&core.operator_sock, &core.token).await;
     let resp = rpc_call(
         &mut s,
         1,
@@ -472,7 +528,7 @@ async fn mcp_run_tool_times_out_when_mcp_takes_too_long() {
         StubBehavior::DelayedOk(Duration::from_secs(5)),
     )
     .await;
-    let mut s = UnixStream::connect(&core.operator_sock).await.unwrap();
+    let mut s = connect_and_auth(&core.operator_sock, &core.token).await;
     let start = std::time::Instant::now();
     let resp = rpc_call(
         &mut s,

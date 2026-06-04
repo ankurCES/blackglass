@@ -211,6 +211,31 @@ async fn main() -> Result<()> {
             // Use the real runtime.sock path (== `socket`) so
             // mcp_run_tool can forward to it.
             let runtime_sock_path = socket.clone();
+            // Operator-socket auth token (Task 2.5.7). If the file
+            // doesn't exist, generate a 32-byte hex token, write it
+            // mode 0600, and log the path so the operator can copy
+            // it into the Tauri client. The token is read on every
+            // connection (not cached), so rotation is just a write
+            // of the same file from a restart.
+            let operator_token_path = data_dir.join("operator.token");
+            if let Some(parent) = operator_token_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if !operator_token_path.exists() {
+                use rand::RngCore;
+                let mut bytes = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut bytes);
+                let token = hex::encode(bytes);
+                std::fs::write(&operator_token_path, format!("{token}\n"))?;
+                std::fs::set_permissions(
+                    &operator_token_path,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o600),
+                )?;
+                tracing::info!(
+                    path = %operator_token_path.display(),
+                    "operator token created"
+                );
+            }
             tokio::spawn(async move {
                 if let Err(e) = blackglass_core::operator_server::run(
                     &operator_sock,
@@ -219,6 +244,7 @@ async fn main() -> Result<()> {
                     op_chain,
                     supervisor,
                     runtime_sock_path,
+                    operator_token_path,
                 )
                 .await
                 {

@@ -34,12 +34,30 @@ use blackglass_core::server::Server;
 use blackglass_engagement::{Engagement, Target, TargetKind};
 use blackglass_ipc::encode_frame;
 use blackglass_profile::Profile;
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+
+/// Auth token used by every test in this file. The test writes it
+/// to `<dir>/operator.token` (mode 0600) before starting the
+/// operator server; the operator client then sends it as the
+/// `auth` method's `params.token` (Task 2.5.7).
+const TEST_TOKEN: &str = "operator-test-token-gate3";
+
+fn write_token_file(dir: &tempfile::TempDir) -> PathBuf {
+    let path = dir.path().join("operator.token");
+    std::fs::write(&path, format!("{TEST_TOKEN}\n")).unwrap();
+    std::fs::set_permissions(
+        &path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    path
+}
 
 #[tokio::test]
 async fn destructive_action_requires_operator_allow() {
@@ -112,10 +130,21 @@ async fn destructive_action_requires_operator_allow() {
     .expect("start placeholder supervisor");
     let op_sup = std::sync::Arc::new(placeholder_sup);
     let op_runtime_sock = std::path::PathBuf::from("/tmp/blackglass-not-yet-set.sock");
+    // 2.5.7: write the 0600 token file before starting the operator,
+    // and pass its path as the 7th arg to `run_operator`.
+    let op_token_path = write_token_file(&dir);
     let operator_handle = tokio::spawn(async move {
         let _ = tokio::time::timeout(
             Duration::from_secs(5),
-            run_operator(&op_sock, op_broker, op_channel, op_chain, op_sup, op_runtime_sock),
+            run_operator(
+                &op_sock,
+                op_broker,
+                op_channel,
+                op_chain,
+                op_sup,
+                op_runtime_sock,
+                op_token_path,
+            ),
         )
         .await;
     });
@@ -129,10 +158,34 @@ async fn destructive_action_requires_operator_allow() {
         assert!(path.exists(), "socket did not appear: {}", path.display());
     }
 
-    // --- 1. Operator client connects and starts reading -------------------
+    // --- 1. Operator client connects, completes `auth`, starts reading -
     let op_client = UnixStream::connect(&operator_sock).await.unwrap();
     let (op_read, mut op_write) = op_client.into_split();
     let mut op_lines = tokio::io::BufReader::new(op_read).lines();
+
+    // Send the `auth` request and read+discard the response so the
+    // subsequent `op_lines.next_line()` call sees the `confirm.request`
+    // push (not the auth response).
+    let auth_req = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "auth",
+        "params": { "token": TEST_TOKEN },
+    });
+    let mut auth_line = auth_req.to_string();
+    auth_line.push('\n');
+    op_write.write_all(auth_line.as_bytes()).await.unwrap();
+    op_write.flush().await.unwrap();
+    let auth_resp_line = tokio::time::timeout(Duration::from_secs(2), op_lines.next_line())
+        .await
+        .expect("operator should respond to auth within 2s")
+        .expect("auth read should not error");
+    let auth_resp: serde_json::Value =
+        serde_json::from_str(auth_resp_line.as_ref().unwrap()).unwrap();
+    assert!(
+        auth_resp.get("error").is_none() || auth_resp["error"].is_null(),
+        "operator auth should succeed, got: {auth_resp}"
+    );
 
     // --- 2. Runtime client connects, authenticates, sends execute --------
     let mut rt_client = UnixStream::connect(&runtime_sock).await.unwrap();
@@ -277,10 +330,20 @@ async fn destructive_action_can_be_denied_by_operator() {
     .expect("start placeholder supervisor");
     let op_sup = std::sync::Arc::new(placeholder_sup);
     let op_runtime_sock = std::path::PathBuf::from("/tmp/blackglass-not-yet-set.sock");
+    // 2.5.7: write the 0600 token file and pass its path to `run_operator`.
+    let op_token_path = write_token_file(&dir);
     let operator_handle = tokio::spawn(async move {
         let _ = tokio::time::timeout(
             Duration::from_secs(5),
-            run_operator(&op_sock, op_broker, op_channel, op_chain, op_sup, op_runtime_sock),
+            run_operator(
+                &op_sock,
+                op_broker,
+                op_channel,
+                op_chain,
+                op_sup,
+                op_runtime_sock,
+                op_token_path,
+            ),
         )
         .await;
     });
@@ -295,6 +358,28 @@ async fn destructive_action_can_be_denied_by_operator() {
     let op_client = UnixStream::connect(&operator_sock).await.unwrap();
     let (op_read, mut op_write) = op_client.into_split();
     let mut op_lines = tokio::io::BufReader::new(op_read).lines();
+
+    // Send the `auth` request and read+discard the response.
+    let auth_req = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "auth",
+        "params": { "token": TEST_TOKEN },
+    });
+    let mut auth_line = auth_req.to_string();
+    auth_line.push('\n');
+    op_write.write_all(auth_line.as_bytes()).await.unwrap();
+    op_write.flush().await.unwrap();
+    let auth_resp_line = tokio::time::timeout(Duration::from_secs(2), op_lines.next_line())
+        .await
+        .expect("operator should respond to auth within 2s")
+        .expect("auth read should not error");
+    let auth_resp: serde_json::Value =
+        serde_json::from_str(auth_resp_line.as_ref().unwrap()).unwrap();
+    assert!(
+        auth_resp.get("error").is_none() || auth_resp["error"].is_null(),
+        "operator auth should succeed, got: {auth_resp}"
+    );
 
     let mut rt_client = UnixStream::connect(&runtime_sock).await.unwrap();
 

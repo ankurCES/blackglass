@@ -6,9 +6,11 @@
 //! go through any "audit.append" RPC because that method does not exist
 //! yet (out of scope for 2.5.3; would be a follow-up).
 //!
-//! Auth gating (Task 2.5.7) is also out of scope; the dispatcher routes
-//! the new methods unconditionally for now and a `// TODO: gate on auth`
-//! marker is left in `operator_server.rs`.
+//! Task 2.5.7: every method (including `audit.query` /
+//! `audit.verify_chain`) is gated on the client having called `auth`
+//! first. The 3 new tests at the bottom of this file exercise that
+//! gating. The 3 original tests below use `connect_and_auth` to send
+//! `auth` before their JSON-RPC call.
 
 use blackglass_audit::{Chain, Event, EventKind};
 use blackglass_core::mcp_spawn_config::McpSpawnConfig;
@@ -30,9 +32,70 @@ async fn noop_supervisor() -> Arc<McpSupervisor> {
     Arc::new(McpSupervisor::start(cfg, &log).await.unwrap())
 }
 
+/// Write a deterministic token file at `<dir>/operator.token` with mode
+/// 0600 and return (token_path, token_bytes). Tests use this to drive
+/// the `auth` method on the operator socket.
+fn write_token_file(dir: &tempfile::TempDir) -> (PathBuf, String) {
+    let token_path = dir.path().join("operator.token");
+    let token = "test-token-2.5.7".to_string();
+    std::fs::write(&token_path, format!("{}\n", token)).expect("write token");
+    std::fs::set_permissions(
+        &token_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .expect("set token perms");
+    (token_path, token)
+}
+
 /// Spawn a fresh operator server on a tempdir socket backed by a fresh
-/// audit chain at `<dir>/chain.jsonl`. Returns the socket path and a
-/// handle to the server task (caller drops the handle to stop it).
+/// audit chain at `<dir>/chain.jsonl`, with a 0600 token file at
+/// `<dir>/operator.token`. Returns (socket_path, server_handle, token).
+async fn spawn_operator_with_chain_and_token(
+    dir: &tempfile::TempDir,
+) -> (PathBuf, tokio::task::JoinHandle<std::io::Result<()>>, String) {
+    // Token must exist BEFORE the server starts so the `auth` route can
+    // find it on every connection.
+    let (_token_path, token) = write_token_file(dir);
+    let (sock_path, server) = spawn_operator_with_chain(dir).await;
+    (sock_path, server, token)
+}
+
+/// Connect to the operator socket and complete the `auth` handshake.
+/// Returns the connected `UnixStream` (the caller re-wraps it as
+/// needed for further `rpc_call`s). Panics on auth failure — callers
+/// that want to *test* auth failure use the unauth path directly.
+async fn connect_and_auth(sock_path: &PathBuf, token: &str) -> UnixStream {
+    use tokio::io::BufReader;
+    let mut s = UnixStream::connect(sock_path).await.expect("connect operator.sock");
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "auth",
+        "params": { "token": token },
+    });
+    let mut line = req.to_string();
+    line.push('\n');
+    s.write_all(line.as_bytes()).await.expect("write auth");
+    s.flush().await.expect("flush auth");
+    let mut reader = BufReader::new(&mut s);
+    let mut buf = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut buf))
+        .await
+        .expect("server should respond to auth within 2s")
+        .expect("auth read should not error");
+    let v: serde_json::Value =
+        serde_json::from_str(buf.trim()).expect("auth response should be JSON");
+    assert!(
+        v.get("error").is_none() || v["error"].is_null(),
+        "auth should succeed in connect_and_auth, got: {v}"
+    );
+    s
+}
+
+/// Spawn a fresh operator server on a tempdir socket backed by a fresh
+/// audit chain at `<dir>/chain.jsonl`. The token file is expected to
+/// already exist (callers in this file use `write_token_file` before
+/// spawning). Returns the socket path and a handle to the server task.
 async fn spawn_operator_with_chain(
     dir: &tempfile::TempDir,
 ) -> (PathBuf, tokio::task::JoinHandle<std::io::Result<()>>) {
@@ -43,9 +106,21 @@ async fn spawn_operator_with_chain(
     let channel = ConfirmChannel::new();
     let supervisor = noop_supervisor().await;
     let runtime_sock = dir.path().join("runtime.sock");
+    let token_path = dir.path().join("operator.token");
     let server = tokio::spawn({
         let p = sock_path.clone();
-        async move { run(&p, broker, channel, Arc::new(Mutex::new(chain)), supervisor, runtime_sock).await }
+        async move {
+            run(
+                &p,
+                broker,
+                channel,
+                Arc::new(Mutex::new(chain)),
+                supervisor,
+                runtime_sock,
+                token_path,
+            )
+            .await
+        }
     });
     // Wait for the socket file to appear.
     for _ in 0..100 {
@@ -107,9 +182,9 @@ async fn audit_query_returns_events_paginated() {
     let chain_path = dir.path().join("chain.jsonl");
     seed_chain(&chain_path, 5);
 
-    let (sock_path, server) = spawn_operator_with_chain(&dir).await;
+    let (sock_path, server, token) = spawn_operator_with_chain_and_token(&dir).await;
 
-    let mut s = UnixStream::connect(&sock_path).await.unwrap();
+    let mut s = connect_and_auth(&sock_path, &token).await;
     let resp = rpc_call(
         &mut s,
         "audit.query",
@@ -142,9 +217,9 @@ async fn audit_query_returns_empty_page_for_out_of_range() {
     let chain_path = dir.path().join("chain.jsonl");
     seed_chain(&chain_path, 5);
 
-    let (sock_path, server) = spawn_operator_with_chain(&dir).await;
+    let (sock_path, server, token) = spawn_operator_with_chain_and_token(&dir).await;
 
-    let mut s = UnixStream::connect(&sock_path).await.unwrap();
+    let mut s = connect_and_auth(&sock_path, &token).await;
     let resp = rpc_call(
         &mut s,
         "audit.query",
@@ -177,9 +252,9 @@ async fn audit_verify_chain_returns_valid_report() {
     let chain_path = dir.path().join("chain.jsonl");
     seed_chain(&chain_path, 2);
 
-    let (sock_path, server) = spawn_operator_with_chain(&dir).await;
+    let (sock_path, server, token) = spawn_operator_with_chain_and_token(&dir).await;
 
-    let mut s = UnixStream::connect(&sock_path).await.unwrap();
+    let mut s = connect_and_auth(&sock_path, &token).await;
     let resp = rpc_call(&mut s, "audit.verify_chain", json!({})).await;
 
     let result = resp.get("result").expect("response should have result");
@@ -191,5 +266,112 @@ async fn audit_verify_chain_returns_valid_report() {
         "expected at least 2 valid events after seeding 2, got {count}"
     );
 
+    drop(server);
+}
+
+// =============================================================================
+// Task 2.5.7: auth gating
+// =============================================================================
+
+#[tokio::test]
+async fn unauthenticated_client_cannot_call_audit_query() {
+    use tokio::io::BufReader;
+    let dir = tempdir().unwrap();
+    // The token file exists (so `auth` could succeed) but the client
+    // does not call `auth` first.
+    let _ = write_token_file(&dir);
+    let (sock_path, server) = spawn_operator_with_chain(&dir).await;
+
+    let mut s = UnixStream::connect(&sock_path).await.unwrap();
+    // Send audit.query WITHOUT auth first.
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "audit.query",
+        "params": { "filter": {}, "page": 0, "page_size": 10 },
+    });
+    let mut line = req.to_string();
+    line.push('\n');
+    s.write_all(line.as_bytes()).await.unwrap();
+    s.flush().await.unwrap();
+    let mut reader = BufReader::new(&mut s);
+    let mut resp = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut resp))
+        .await
+        .unwrap()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
+    assert_eq!(
+        v["error"]["code"], -32001,
+        "expected auth-required (-32001), got: {v}"
+    );
+    drop(server);
+}
+
+#[tokio::test]
+async fn authenticated_client_can_call_audit_query() {
+    use tokio::io::BufReader;
+    let dir = tempdir().unwrap();
+    let chain_path = dir.path().join("chain.jsonl");
+    seed_chain(&chain_path, 2);
+
+    let (sock_path, server, token) = spawn_operator_with_chain_and_token(&dir).await;
+
+    let mut s = connect_and_auth(&sock_path, &token).await;
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "audit.query",
+        "params": { "filter": {}, "page": 0, "page_size": 10 },
+    });
+    let mut line = req.to_string();
+    line.push('\n');
+    s.write_all(line.as_bytes()).await.unwrap();
+    s.flush().await.unwrap();
+    let mut reader = BufReader::new(&mut s);
+    let mut resp = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut resp))
+        .await
+        .unwrap()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
+    assert!(
+        v.get("error").is_none() || v["error"].is_null(),
+        "expected no error after auth, got: {v}"
+    );
+    drop(server);
+}
+
+#[tokio::test]
+async fn auth_with_wrong_token_returns_error() {
+    use tokio::io::BufReader;
+    let dir = tempdir().unwrap();
+    // Token file exists with a known-good token, but the client
+    // presents a wrong one.
+    let _ = write_token_file(&dir);
+    let (sock_path, server) = spawn_operator_with_chain(&dir).await;
+
+    let mut s = UnixStream::connect(&sock_path).await.unwrap();
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "auth",
+        "params": { "token": "wrong-token" },
+    });
+    let mut line = req.to_string();
+    line.push('\n');
+    s.write_all(line.as_bytes()).await.unwrap();
+    s.flush().await.unwrap();
+    let mut reader = BufReader::new(&mut s);
+    let mut resp = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut resp))
+        .await
+        .unwrap()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(resp.trim()).unwrap();
+    assert_eq!(
+        v["error"]["code"], -32002,
+        "expected auth-failed (-32002), got: {v}"
+    );
     drop(server);
 }

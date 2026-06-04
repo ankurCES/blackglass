@@ -39,6 +39,52 @@ use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
+/// Auth token used by every test in this file. The test writes it
+/// to `<dir>/operator.token` (mode 0600) before starting the
+/// operator server (Task 2.5.7).
+const TEST_TOKEN: &str = "operator-test-token-mcp-run";
+
+fn write_token_file(dir: &tempfile::TempDir) -> PathBuf {
+    let path = dir.path().join("operator.token");
+    std::fs::write(&path, format!("{TEST_TOKEN}\n")).unwrap();
+    std::fs::set_permissions(
+        &path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    path
+}
+
+/// Connect to the operator socket and complete the `auth` handshake.
+/// Returns the connected `UnixStream` (the caller re-wraps it as
+/// needed for further RPC calls).
+async fn connect_and_auth(sock_path: &PathBuf, token: &str) -> UnixStream {
+    let mut s = UnixStream::connect(sock_path).await.expect("connect operator.sock");
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "auth",
+        "params": { "token": token },
+    });
+    let mut line = req.to_string();
+    line.push('\n');
+    s.write_all(line.as_bytes()).await.expect("write auth");
+    s.flush().await.expect("flush auth");
+    let mut reader = tokio::io::BufReader::new(&mut s);
+    let mut buf = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut buf))
+        .await
+        .expect("server should respond to auth within 2s")
+        .expect("auth read should not error");
+    let v: serde_json::Value =
+        serde_json::from_str(buf.trim()).expect("auth response should be JSON");
+    assert!(
+        v.get("error").is_none() || v["error"].is_null(),
+        "auth should succeed in connect_and_auth, got: {v}"
+    );
+    s
+}
+
 /// Stub runtime.sock reply (the operator's mcp_run_tool decodes this as
 /// a `RpcResponse`). `{ok: true, id: 1, result: {ok: true, audit_event_id: "test-audit-id"}}`.
 const STUB_REPLY: &[u8] = br#"{"id":1,"ok":true,"result":{"ok":true,"audit_event_id":"test-audit-id"}}"#;
@@ -88,6 +134,15 @@ async fn end_to_end_mcp_run_emits_full_audit_chain() {
     // final assertion simple (we only need to open one file).
     let chain_path = dir.path().join("chain.jsonl");
     let sup_log = dir.path().join("supervisor.log");
+    // Operator auth token file (required by Task 2.5.7: the dispatcher
+    // gates every method on auth). The token is a 32-byte hex string.
+    let operator_token_path = dir.path().join("operator.token");
+    let operator_token = "0123456789abcdef0123456789abcdef\n";
+    std::fs::write(&operator_token_path, operator_token).unwrap();
+    std::fs::set_permissions(
+        &operator_token_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    ).unwrap();
 
     // Stub runtime.sock listener (must exist before operator server
     // starts; otherwise the first `mcp_run_tool` will hit ECONNREFUSED).
@@ -130,6 +185,7 @@ async fn end_to_end_mcp_run_emits_full_audit_chain() {
             op_chain_clone,
             op_sup,
             op_runtime,
+            operator_token_path,
         )
         .await
     });
@@ -147,7 +203,31 @@ async fn end_to_end_mcp_run_emits_full_audit_chain() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // --- call mcp_run_tool ----------------------------------------------
+    // Auth first (Task 2.5.7). The token file is 32 hex bytes + "\n".
+    // OperatorAuth verifies that the sent bytes (sans the trailing \n)
+    // match the file contents after the \n.
     let mut client = UnixStream::connect(&operator_sock).await.unwrap();
+    let auth_req = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "auth",
+        "params": { "token": operator_token.trim_end_matches('\n') }
+    });
+    let mut auth_line = auth_req.to_string();
+    auth_line.push('\n');
+    client.write_all(auth_line.as_bytes()).await.unwrap();
+    client.flush().await.unwrap();
+    let mut auth_buf = String::new();
+    {
+        let mut reader = tokio::io::BufReader::new(&mut client);
+        let _ = tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut auth_buf))
+            .await
+            .expect("auth response in 2s")
+            .expect("read auth response");
+    }
+    let auth_resp: serde_json::Value = serde_json::from_str(auth_buf.trim()).unwrap();
+    assert!(auth_resp.get("result").is_some(),
+        "auth should succeed, got: {auth_resp}");
     let req = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -218,6 +298,13 @@ async fn end_to_end_mcp_run_started_carries_domain_and_target() {
     let runtime_sock = dir.path().join("runtime.sock");
     let chain_path = dir.path().join("chain.jsonl");
     let sup_log = dir.path().join("supervisor.log");
+    let operator_token_path = dir.path().join("operator.token");
+    let operator_token = "fedcba9876543210fedcba9876543210\n";
+    std::fs::write(&operator_token_path, operator_token).unwrap();
+    std::fs::set_permissions(
+        &operator_token_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    ).unwrap();
 
     let runtime_handle = spawn_stub_runtime(runtime_sock.clone());
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -252,6 +339,7 @@ async fn end_to_end_mcp_run_started_carries_domain_and_target() {
             op_chain_clone,
             op_sup,
             op_runtime,
+            operator_token_path,
         )
         .await
     });
