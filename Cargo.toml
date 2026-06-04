@@ -12,6 +12,7 @@ members = [
     "crates/mcp-packets",
     "crates/python-bridge",
     "crates/polkit-helper",
+    "crates/xtask",
     "app/src-tauri",
 ]
 

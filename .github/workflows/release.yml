@@ -1,0 +1,81 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  id-token: write       # for cosign keyless signing
+  contents: write       # for creating the GitHub Release
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { toolchain: "1.95" }
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install uv
+      - run: cargo install cargo-deb cargo-deny cargo-audit
+      - run: sudo apt-get install -y libwebkit2gtk-6.0-dev libgtk-3-dev \
+              libayatana-appindicator3-dev librsvg2-dev libudev-dev \
+              libdbus-1-dev libpolkit-gobject-1-dev python3-dev pkg-config \
+              desktop-file-utils appstream-util cosign apparmor-utils
+
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo deny check
+      - run: cargo audit
+      - run: cargo test --workspace
+
+      - name: Build Python sidecar venv
+        run: |
+          cd python/sidecar
+          uv venv /tmp/sidecar-venv --python python3.12
+          uv pip install --python /tmp/sidecar-venv/bin/python .
+          /tmp/sidecar-venv/bin/python -c "
+            import blackglass_sidecar.scapy_bridge
+            import blackglass_sidecar.impacket_bridge
+            import blackglass_sidecar.hardware_bridge
+            print('sidecar venv OK')
+          "
+
+      - name: Build Tauri frontend
+        run: |
+          cd app
+          npm ci
+          npm run build
+
+      - name: Build .deb
+        run: cargo run -p xtask -- deb --variants full
+
+      - name: Install .deb
+        run: sudo apt-get install -y ./target/debian/blackglass-full_*.deb
+
+      - name: Confinement test
+        run: sudo cargo run -p xtask -- confinement-test
+
+      - name: Sign .deb with cosign
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          for variant in full; do
+            cosign sign-blob \
+              --output-signature "blackglass-${variant}.deb.sig" \
+              --output-certificate "blackglass-${variant}.deb.cert" \
+              "blackglass-${variant}.deb"
+          done
+
+      - name: Generate SHA256SUMS
+        run: sha256sum blackglass-*.deb > SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            blackglass-*.deb
+            blackglass-*.deb.sig
+            blackglass-*.deb.cert
+            SHA256SUMS
