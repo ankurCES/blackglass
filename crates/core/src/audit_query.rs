@@ -12,6 +12,7 @@
 
 use blackglass_audit::Chain;
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -68,8 +69,14 @@ pub struct QueryResponse {
     pub query_ms: u64,
 }
 
-pub fn handle_query(chain: &Chain, params: QueryParams) -> Result<QueryResponse, AuditQueryError> {
-    let page = chain.query(&params.filter, params.page, params.page_size)?;
+pub fn handle_query(chain: &Mutex<Chain>, params: QueryParams) -> Result<QueryResponse, AuditQueryError> {
+    // Lock briefly to perform the read-only query. The `Chain::query`
+    // method takes `&self` and is purely read-only; the lock just
+    // satisfies the borrow checker when the same `Arc<Mutex<Chain>>`
+    // is also shared with `mcp_run_tool` (which needs `&mut Chain` to
+    // append audit events).
+    let guard = chain.lock().expect("audit chain mutex poisoned");
+    let page = guard.query(&params.filter, params.page, params.page_size)?;
     Ok(QueryResponse {
         events: page.events,
         total_matched: page.total_matched,
@@ -87,6 +94,10 @@ pub fn handle_query(chain: &Chain, params: QueryParams) -> Result<QueryResponse,
 /// An `Ok(n)` result means the chain is intact and contains `n` events.
 /// An `Err(_)` means the chain is broken; the dispatcher maps that to a
 /// JSON-RPC error.
-pub fn handle_verify(chain: &Chain) -> Result<u64, AuditQueryError> {
-    Ok(Chain::verify(chain.path())?)
+pub fn handle_verify(chain: &Mutex<Chain>) -> Result<u64, AuditQueryError> {
+    // `Chain::verify` is path-based and static, but we lock the mutex
+    // anyway so callers don't need to special-case "I have the
+    // shared Arc" vs "I have a fresh open chain".
+    let guard = chain.lock().expect("audit chain mutex poisoned");
+    Ok(Chain::verify(guard.path())?)
 }

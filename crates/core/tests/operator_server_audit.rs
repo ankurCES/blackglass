@@ -16,7 +16,7 @@ use blackglass_core::mcp_supervisor::McpSupervisor;
 use blackglass_core::operator_server::{run, ConfirmChannel};
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -45,7 +45,7 @@ async fn spawn_operator_with_chain(
     let runtime_sock = dir.path().join("runtime.sock");
     let server = tokio::spawn({
         let p = sock_path.clone();
-        async move { run(&p, broker, channel, Arc::new(chain), supervisor, runtime_sock).await }
+        async move { run(&p, broker, channel, Arc::new(Mutex::new(chain)), supervisor, runtime_sock).await }
     });
     // Wait for the socket file to appear.
     for _ in 0..100 {

@@ -23,10 +23,12 @@
 
 use crate::mcp_supervisor::{ChildStatus, McpSupervisor};
 use crate::rpc::{Method, RpcRequest, RpcResponse};
+use blackglass_audit::{Chain, Event, EventKind};
 use blackglass_ipc::encode_frame;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -107,6 +109,7 @@ pub async fn handle_mcp_run_tool(
     params: McpRunParams,
     supervisor: &McpSupervisor,
     runtime_sock_path: &Path,
+    chain: &Mutex<Chain>,
 ) -> Result<McpRunResult, McpRunError> {
     let mcp_name = mcp_for_domain(&params.domain)
         .ok_or_else(|| McpRunError::UnknownDomain(params.domain.clone()))?;
@@ -117,6 +120,18 @@ pub async fn handle_mcp_run_tool(
         // all count as "not running" from the operator's point of view.
         _ => return Err(McpRunError::McpDown(mcp_name.into())),
     }
+
+    // Audit: emit `McpRunStarted` *before* the forward so a forensic
+    // reader sees the intent even if the MCP process crashes
+    // mid-execution. The `McpRunCompleted` event below pairs with
+    // this one and carries the ok/ms fields. If the forward fails
+    // (Timeout / Io / McpError) we still emit Completed with
+    // `ok=false` and the elapsed ms.
+    append_audit(chain, EventKind::McpRunStarted {
+        domain: params.domain.clone(),
+        target: params.target.clone(),
+    });
+    let started = Instant::now();
 
     // Forward to runtime.sock as execute_action. The runtime speaks the
     // length-prefixed `rpc::RpcRequest` protocol (NOT JSON-RPC), so we
@@ -139,9 +154,22 @@ pub async fn handle_mcp_run_tool(
         }),
     };
     let req_bytes = serde_json::to_vec(&req)?;
-    let mut stream = UnixStream::connect(runtime_sock_path).await?;
-    stream.write_all(&encode_frame(&req_bytes)).await?;
-    stream.flush().await?;
+    let mut stream = match UnixStream::connect(runtime_sock_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            // Emit Completed with the failure and return.
+            emit_completed(chain, &params, false, started);
+            return Err(McpRunError::Io(e));
+        }
+    };
+    if let Err(e) = stream.write_all(&encode_frame(&req_bytes)).await {
+        emit_completed(chain, &params, false, started);
+        return Err(McpRunError::Io(e));
+    }
+    if let Err(e) = stream.flush().await {
+        emit_completed(chain, &params, false, started);
+        return Err(McpRunError::Io(e));
+    }
 
     let dur = timeout();
     let dur_ms = dur.as_millis() as u64;
@@ -173,16 +201,29 @@ pub async fn handle_mcp_run_tool(
     };
     let payload = match tokio::time::timeout(dur, read_fut).await {
         Ok(Ok(p)) => p,
-        Ok(Err(e)) => return Err(McpRunError::Io(e)),
-        Err(_) => return Err(McpRunError::Timeout(mcp_name.into(), dur_ms)),
+        Ok(Err(e)) => {
+            emit_completed(chain, &params, false, started);
+            return Err(McpRunError::Io(e));
+        }
+        Err(_) => {
+            emit_completed(chain, &params, false, started);
+            return Err(McpRunError::Timeout(mcp_name.into(), dur_ms));
+        }
     };
-    let resp: RpcResponse = serde_json::from_slice(&payload)?;
+    let resp: RpcResponse = match serde_json::from_slice(&payload) {
+        Ok(r) => r,
+        Err(e) => {
+            emit_completed(chain, &params, false, started);
+            return Err(McpRunError::Json(e));
+        }
+    };
 
     if let Some(err) = resp.error {
         // The chokepoint's errors include strings like "gate3 denied: ..."
         // and "gate denied: ..." — those flow through verbatim to the
         // operator's `error.message`, and the test asserts the substring
         // "denied" / "gate" is present.
+        emit_completed(chain, &params, false, started);
         return Err(McpRunError::McpError(mcp_name.into(), err));
     }
     if !resp.ok {
@@ -190,14 +231,16 @@ pub async fn handle_mcp_run_tool(
         // possible if the runtime synthesized an error response that
         // didn't populate the `error` field. Surface a synthetic message
         // so the operator always has something to display.
+        emit_completed(chain, &params, false, started);
         return Err(McpRunError::McpError(
             mcp_name.into(),
             "runtime returned ok=false with no error message".to_string(),
         ));
     }
     let result = resp.result.unwrap_or(serde_json::Value::Null);
-    Ok(McpRunResult {
-        ok: result.get("ok").and_then(|v| v.as_bool()).unwrap_or(true),
+    let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+    let res = McpRunResult {
+        ok,
         stdout: result.get("stdout").and_then(|v| v.as_str()).map(String::from),
         stderr: result.get("stderr").and_then(|v| v.as_str()).map(String::from),
         audit_event_id: result
@@ -208,5 +251,37 @@ pub async fn handle_mcp_run_tool(
             .get("error")
             .and_then(|v| v.as_str())
             .map(String::from),
-    })
+    };
+    // Audit: emit `McpRunCompleted` on the success path. We always
+    // pair it with the `McpRunStarted` from above so the audit
+    // reader can correlate the two events by (domain, target).
+    emit_completed(chain, &params, res.ok, started);
+    Ok(res)
+}
+
+/// Append a `McpRunStarted` / `McpRunCompleted` event to the audit
+/// chain. Failures here are logged and swallowed — auditing must
+/// never block a runtime path. (The `Chain` is wrapped in a `Mutex`
+/// because `Chain::append` takes `&mut self`; we lock briefly.)
+fn append_audit(chain: &Mutex<Chain>, kind: EventKind) {
+    let ev = Event {
+        seq: 0, // Chain::append overwrites this from its internal counter
+        ts: chrono::Utc::now().to_rfc3339(),
+        prev_hash: String::new(), // empty → Chain::append fills from `self.last`
+        kind,
+        payload: serde_json::json!({}),
+    };
+    if let Err(e) = chain.lock().expect("audit chain mutex poisoned").append(ev) {
+        eprintln!("mcp_run_tool: audit append failed: {e}");
+    }
+}
+
+fn emit_completed(chain: &Mutex<Chain>, params: &McpRunParams, ok: bool, started: Instant) {
+    let ms = started.elapsed().as_millis() as u64;
+    append_audit(chain, EventKind::McpRunCompleted {
+        domain: params.domain.clone(),
+        target: params.target.clone(),
+        ok,
+        ms,
+    });
 }

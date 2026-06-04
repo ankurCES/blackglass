@@ -93,7 +93,7 @@ async fn destructive_action_requires_operator_allow() {
     let op_broker = broker.clone();
     let op_channel = channel.clone();
     let op_sock = operator_sock.clone();
-    let op_chain = std::sync::Arc::new(Chain::open(&audit_path).unwrap());
+    let op_chain = std::sync::Arc::new(std::sync::Mutex::new(Chain::open(&audit_path).unwrap()));
     // 2.5.5 added two args to `run_operator`: a supervisor
     // (used by `mcp_run_tool`'s liveness pre-flight) and the
     // runtime.sock path (the forward target). This test doesn't
@@ -258,7 +258,7 @@ async fn destructive_action_can_be_denied_by_operator() {
     let op_broker = broker.clone();
     let op_channel = channel.clone();
     let op_sock = operator_sock.clone();
-    let op_chain = std::sync::Arc::new(Chain::open(&audit_path).unwrap());
+    let op_chain = std::sync::Arc::new(std::sync::Mutex::new(Chain::open(&audit_path).unwrap()));
     // 2.5.5 added two args to `run_operator`: a supervisor
     // (used by `mcp_run_tool`'s liveness pre-flight) and the
     // runtime.sock path (the forward target). This test doesn't

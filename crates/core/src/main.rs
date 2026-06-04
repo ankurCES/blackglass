@@ -146,62 +146,79 @@ async fn main() -> Result<()> {
             let operator_sock = data_dir.join("operator.sock");
             let op_broker = broker.clone();
             let op_channel = channel.clone();
-            let op_chain = Arc::new(Chain::open(&audit)?);
-            // TODO(2.5.6): wire a real `McpSupervisor` (built from
-            // `mcp-servers.toml`) and the real `runtime.sock` path
-            // (== `socket` above) into the operator server. For 2.5.5
-            // we pass placeholders: an empty-config supervisor (whose
-            // `status(name)` returns `None` for everything, so
-            // `mcp_run_tool` will always return `McpDown` until 2.5.6
-            // fills this in) and a placeholder socket path that won't
-            // exist (so even if the supervisor is alive, the runtime
-            // forward will fail with a clear `NotFound`). Neither path
-            // is exercised in production before 2.5.6 ships.
-            let placeholder_supervisor = {
-                let cfg = blackglass_core::mcp_spawn_config::McpSpawnConfig::default();
-                let sup_path = data_dir.join("supervisor-placeholder.log");
-                if let Some(parent) = sup_path.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                match blackglass_core::mcp_supervisor::McpSupervisor::start_with_chain(
-                    cfg,
-                    &sup_path,
-                    &data_dir.join("chain-placeholder.jsonl"),
-                )
-                .await
-                {
-                    Ok(s) => Arc::new(s),
-                    Err(e) => {
-                        eprintln!("failed to start placeholder supervisor: {e}");
-                        // Build a no-op supervisor by going through
-                        // start_with_chain on a fresh tempdir. If
-                        // even that fails, the operator server
-                        // can't be wired and we should exit.
-                        let tmp = std::env::temp_dir().join(format!(
-                            "blackglass-supervisor-fallback-{}.log",
-                            std::process::id()
-                        ));
-                        Arc::new(
-                            blackglass_core::mcp_supervisor::McpSupervisor::start_with_chain(
-                                blackglass_core::mcp_spawn_config::McpSpawnConfig::default(),
-                                &tmp,
-                                &tmp.with_extension("jsonl"),
-                            )
-                            .await
-                            .expect("start fallback placeholder supervisor"),
-                        )
-                    }
+            let op_chain = Arc::new(std::sync::Mutex::new(Chain::open(&audit)?));
+            // Load mcp-servers.toml from XDG_CONFIG_HOME (default
+            // ~/.config). Missing file is not an error — we just run
+            // with no MCPs spawned and the operator's `mcp_run_tool`
+            // will return McpDown for every domain. This is the
+            // first-run / no-config-installed case.
+            let config_path = {
+                let xdg = std::env::var("XDG_CONFIG_HOME")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config"))
+                    });
+                match xdg {
+                    Some(dir) => dir.join("blackglass").join("mcp-servers.toml"),
+                    None => data_dir.join("mcp-servers.toml"),
                 }
             };
-            let placeholder_runtime_sock = PathBuf::from("/tmp/blackglass-not-yet-set.sock");
+            let mcp_config = if config_path.exists() {
+                match blackglass_core::mcp_spawn_config::McpSpawnConfig::load(&config_path) {
+                    Ok(cfg) => {
+                        tracing::info!(
+                            path = %config_path.display(),
+                            servers = cfg.servers.len(),
+                            "loaded mcp-servers.toml"
+                        );
+                        cfg
+                    }
+                    Err(e) => {
+                        eprintln!("warning: failed to parse {}: {e}", config_path.display());
+                        blackglass_core::mcp_spawn_config::McpSpawnConfig::default()
+                    }
+                }
+            } else {
+                tracing::info!(
+                    path = %config_path.display(),
+                    "mcp-servers.toml not found; running with no MCPs spawned"
+                );
+                blackglass_core::mcp_spawn_config::McpSpawnConfig::default()
+            };
+            // Build a real McpSupervisor from the (possibly empty)
+            // config. The supervisor's audit chain is distinct from
+            // the chokepoint's chain (it lives in the data dir, not
+            // in the runtime dir) — the McpServer{Spawed,Exited}
+            // events go to the supervisor's chain and are visible to
+            // the operator via `audit.query` once 2.5.8 ships the
+            // cross-chain tail.
+            let sup_log_path = data_dir.join("supervisor.log");
+            let sup_chain_path = data_dir.join("supervisor-chain.jsonl");
+            let supervisor = match blackglass_core::mcp_supervisor::McpSupervisor::start_with_chain(
+                mcp_config,
+                &sup_log_path,
+                &sup_chain_path,
+            )
+            .await
+            {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    return Err(anyhow::anyhow!("failed to start McpSupervisor: {e}"));
+                }
+            };
+            // Use the real runtime.sock path (== `socket`) so
+            // mcp_run_tool can forward to it.
+            let runtime_sock_path = socket.clone();
             tokio::spawn(async move {
                 if let Err(e) = blackglass_core::operator_server::run(
                     &operator_sock,
                     op_broker,
                     op_channel,
                     op_chain,
-                    placeholder_supervisor,
-                    placeholder_runtime_sock,
+                    supervisor,
+                    runtime_sock_path,
                 )
                 .await
                 {

@@ -269,7 +269,7 @@ async fn spawn_test_core_with_behavior(
     // and the operator server also takes a `Arc<McpSupervisor>` to
     // look up liveness. Sharing the same `McpSupervisor` across
     // both callers is exactly what production does.
-    let chain = Arc::new(Chain::open(&chain_path).expect("open empty chain"));
+    let chain = Arc::new(Mutex::new(Chain::open(&chain_path).expect("open empty chain")));
     let broker = ConfirmationBroker::new();
     let channel = ConfirmChannel::new();
     let op_sock = operator_sock.clone();

@@ -4,7 +4,7 @@
 //! §2.4 + §6.2.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
@@ -61,7 +61,7 @@ pub async fn run(
     sock_path: &Path,
     broker: ConfirmationBroker,
     channel: ConfirmChannel,
-    chain: Arc<Chain>,
+    chain: Arc<Mutex<Chain>>,
     supervisor: Arc<McpSupervisor>,
     runtime_sock_path: PathBuf,
 ) -> std::io::Result<()> {
@@ -93,7 +93,7 @@ async fn handle(
     stream: UnixStream,
     broker: ConfirmationBroker,
     channel: Arc<ConfirmChannel>,
-    chain: Arc<Chain>,
+    chain: Arc<Mutex<Chain>>,
     supervisor: Arc<McpSupervisor>,
     runtime_sock_path: PathBuf,
 ) -> std::io::Result<()> {
@@ -161,7 +161,7 @@ async fn handle(
 async fn handle_rpc(
     v: serde_json::Value,
     broker: &ConfirmationBroker,
-    chain: &Chain,
+    chain: &Mutex<Chain>,
     supervisor: &Arc<McpSupervisor>,
     runtime_sock_path: PathBuf,
 ) -> Option<String> {
@@ -209,7 +209,7 @@ async fn handle_rpc(
             Err(e) => Some(jsonrpc_error(id, -32603, &format!("audit: {e}"))),
         },
         "mcp_run_tool" => match serde_json::from_value::<mcp_run_tool::McpRunParams>(params) {
-            Ok(p) => match mcp_run_tool::handle_mcp_run_tool(p, supervisor, &runtime_sock_path).await {
+            Ok(p) => match mcp_run_tool::handle_mcp_run_tool(p, supervisor, &runtime_sock_path, chain).await {
                 Ok(resp) => match serde_json::to_value(&resp) {
                     Ok(v) => Some(jsonrpc_ok(id, v)),
                     Err(e) => Some(jsonrpc_error(id, -32603, &format!("serialize: {e}"))),

@@ -3,7 +3,7 @@ use blackglass_core::broker::ConfirmationBroker;
 use blackglass_core::mcp_spawn_config::McpSpawnConfig;
 use blackglass_core::mcp_supervisor::McpSupervisor;
 use blackglass_core::operator_server::{run, ConfirmChannel, ConfirmRequest};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -24,7 +24,7 @@ async fn accepts_connections_and_survives_malformed_input() {
     let chain_path = dir.path().join("chain.jsonl");
     let broker = ConfirmationBroker::new();
     let channel = ConfirmChannel::new();
-    let chain = Arc::new(Chain::open(&chain_path).unwrap());
+    let chain = Arc::new(Mutex::new(Chain::open(&chain_path).unwrap()));
     let supervisor = noop_supervisor().await;
     let runtime_sock = dir.path().join("runtime.sock");
 
@@ -76,7 +76,7 @@ async fn channel_push_forwards_to_connected_client() {
     let chain_path = dir.path().join("chain.jsonl");
     let broker = ConfirmationBroker::new();
     let channel = ConfirmChannel::new();
-    let chain = Arc::new(Chain::open(&chain_path).unwrap());
+    let chain = Arc::new(Mutex::new(Chain::open(&chain_path).unwrap()));
     let supervisor = noop_supervisor().await;
     let runtime_sock = dir.path().join("runtime.sock");
 
