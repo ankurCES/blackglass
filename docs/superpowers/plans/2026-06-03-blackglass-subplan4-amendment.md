@@ -120,15 +120,24 @@ Expected: the enum has variants like `ActionRequested`, `OperatorConfirmationReq
 `crates/audit/tests/event_kinds.rs`:
 
 ```rust
-use blackglass_audit::{Event, EventKind, Chain};
-use std::io::Write;
+//! TDD tests for the new MCP-lifecycle event kinds. See plan §1.1 and
+//! sub-plan 4 amendment §1.1.
+
+use blackglass_audit::{Chain, Event, EventKind};
+use serde_json::json;
 
 #[test]
 fn mcp_server_spawned_serializes_with_server_and_pid() {
-    let event = Event::new(EventKind::McpServerSpawned {
-        server: "mcp-ad".into(),
-        pid: 12345,
-    });
+    let event = Event {
+        seq: 0,
+        ts: "2026-06-03T00:00:00Z".into(),
+        prev_hash: String::new(),
+        kind: EventKind::McpServerSpawned {
+            server: "mcp-ad".into(),
+            pid: 12345,
+        },
+        payload: json!({}),
+    };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains(r#""kind":"mcp_server_spawned""#));
     assert!(json.contains(r#""server":"mcp-ad""#));
@@ -137,11 +146,17 @@ fn mcp_server_spawned_serializes_with_server_and_pid() {
 
 #[test]
 fn mcp_server_exited_serializes_with_code_and_restart_count() {
-    let event = Event::new(EventKind::McpServerExited {
-        server: "mcp-flipper".into(),
-        code: -1,
-        restart_count: 3,
-    });
+    let event = Event {
+        seq: 0,
+        ts: "2026-06-03T00:00:00Z".into(),
+        prev_hash: String::new(),
+        kind: EventKind::McpServerExited {
+            server: "mcp-flipper".into(),
+            code: -1,
+            restart_count: 3,
+        },
+        payload: json!({}),
+    };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains(r#""kind":"mcp_server_exited""#));
     assert!(json.contains(r#""code":-1"#));
@@ -150,16 +165,28 @@ fn mcp_server_exited_serializes_with_code_and_restart_count() {
 
 #[test]
 fn mcp_run_started_and_completed_serialize() {
-    let start = Event::new(EventKind::McpRunStarted {
-        domain: "ad".into(),
-        target: "ad-impacket_psexec".into(),
-    });
-    let end = Event::new(EventKind::McpRunCompleted {
-        domain: "ad".into(),
-        target: "ad-impacket_psexec".into(),
-        ok: true,
-        ms: 1234,
-    });
+    let start = Event {
+        seq: 0,
+        ts: "2026-06-03T00:00:00Z".into(),
+        prev_hash: String::new(),
+        kind: EventKind::McpRunStarted {
+            domain: "ad".into(),
+            target: "ad-impacket_psexec".into(),
+        },
+        payload: json!({}),
+    };
+    let end = Event {
+        seq: 1,
+        ts: "2026-06-03T00:00:01Z".into(),
+        prev_hash: String::new(),
+        kind: EventKind::McpRunCompleted {
+            domain: "ad".into(),
+            target: "ad-impacket_psexec".into(),
+            ok: true,
+            ms: 1234,
+        },
+        payload: json!({}),
+    };
     assert!(serde_json::to_string(&start).unwrap().contains(r#""kind":"mcp_run_started""#));
     assert!(serde_json::to_string(&end).unwrap().contains(r#""kind":"mcp_run_completed""#));
     assert!(serde_json::to_string(&end).unwrap().contains(r#""ok":true"#));
@@ -171,20 +198,44 @@ fn new_event_kinds_extend_the_hash_chain() {
     // The hash chain must include the new event kinds.
     let dir = tempfile::tempdir().unwrap();
     let mut chain = Chain::open(dir.path().join("chain.jsonl")).unwrap();
-    chain.append(Event::new(EventKind::McpServerSpawned {
-        server: "mcp-ad".into(),
-        pid: 1,
-    })).unwrap();
-    chain.append(Event::new(EventKind::McpRunCompleted {
-        domain: "ad".into(),
-        target: "ad-impacket_psexec".into(),
-        ok: true,
-        ms: 100,
-    })).unwrap();
-    let report = chain.verify_chain().unwrap();
-    assert_eq!(report.events_checked, 2);
+    chain
+        .append(Event {
+            seq: 0,
+            ts: "2026-06-03T00:00:00Z".into(),
+            prev_hash: String::new(),
+            kind: EventKind::McpServerSpawned {
+                server: "mcp-ad".into(),
+                pid: 1,
+            },
+            payload: json!({}),
+        })
+        .unwrap();
+    chain
+        .append(Event {
+            seq: 1,
+            ts: "2026-06-03T00:00:01Z".into(),
+            prev_hash: String::new(),
+            kind: EventKind::McpRunCompleted {
+                domain: "ad".into(),
+                target: "ad-impacket_psexec".into(),
+                ok: true,
+                ms: 100,
+            },
+            payload: json!({}),
+        })
+        .unwrap();
+    let count = Chain::verify(dir.path().join("chain.jsonl")).unwrap();
+    assert_eq!(count, 2);
 }
 ```
+
+> **Note:** This test file was implemented in commit `6f59d84` and is
+> already on disk. The code block above matches that committed file
+> verbatim — `Event` is built as a struct literal (not `Event::new`),
+> `payload: json!({})` is included on every event, and `Chain::verify`
+> returns a `u64` count (not a `VerifyReport { events_checked, valid }`).
+> The plan block above has been updated from the original draft to
+> reflect the real API used in the shipped commit.
 
 - [ ] **Step 3: Run the test to verify it fails**
 
@@ -442,10 +493,10 @@ git commit -m "feat(core): operator-socket auth via 0600 token file"
 - Modify: `crates/core/src/operator_server.rs`: route the new methods
 - Create: `crates/core/tests/operator_server_audit.rs`
 
-- [ ] **Step 1: Read the existing `Chain::query` and `Chain::verify_chain`**
+- [ ] **Step 1: Read the existing `Chain::query` and `Chain::verify`**
 
-Run: `grep -n "pub fn query\|pub fn verify_chain" crates/audit/src/lib.rs`
-Expected: both functions exist (added in sub-plan 4's original Phase 2 / Task 2.4). `query(filter, page, page_size)` returns `Vec<Event>`; `verify_chain()` returns `VerifyReport { events_checked, valid }`.
+Run: `grep -n "pub fn query\|pub fn verify\|pub struct AuditPage\|pub struct ChainVerification" crates/audit/src/lib.rs`
+Expected: `Chain::query(&self, filter, page, page_size) -> Result<AuditPage, AuditError>` (returns a paginated `AuditPage` with `events`, `total_matched`, `hash_chain_head`, `hash_chain_verified`, `query_ms`). `Chain::verify(path) -> Result<u64, AuditError>` (static, path-based, returns the event count). There is **no** `Chain::verify_chain()` method on `Chain` (the in-band equivalent is `Chain::verify_chain_in_band(&self) -> Result<ChainVerification, AuditError>`); and there is **no** `report.events_checked` accessor — `Chain::verify` returns the count directly. The `Chain::query` method takes three arguments: `filter`, `page`, `page_size`.
 
 - [ ] **Step 2: Write the failing test for the 3 audit methods**
 
@@ -464,7 +515,17 @@ async fn audit_query_returns_events_paginated() {
     // Append 5 events
     for i in 0..5 {
         client.notify("audit.append", json!({
-            "event": Event::new(EventKind::OperatorConfirmationRequested { id: format!("c{i}"), tool: "x".into(), args: "{}".into() })
+            "event": Event {
+                seq: 0,
+                ts: "2026-06-03T00:00:00Z".into(),
+                prev_hash: String::new(),
+                kind: EventKind::OperatorConfirmationRequested {
+                    id: format!("c{i}"),
+                    tool: "x".into(),
+                    args: "{}".into(),
+                },
+                payload: json!({}),
+            }
         })).await.unwrap();
     }
     // Query page 0
@@ -474,7 +535,7 @@ async fn audit_query_returns_events_paginated() {
         "page_size": 3
     })).await.unwrap();
     assert_eq!(result["events"].as_array().unwrap().len(), 3);
-    assert_eq!(result["total"], 5);
+    assert_eq!(result["total_matched"], 5);
 }
 
 #[tokio::test]
@@ -494,8 +555,9 @@ async fn audit_verify_chain_returns_valid_report() {
     let core = spawn_core().await;
     let mut client = connect_operator_with_token(&core).await;
     let result: serde_json::Value = client.call("audit.verify_chain", json!({})).await.unwrap();
-    assert_eq!(result["valid"], true);
-    assert!(result["events_checked"].as_u64().unwrap() >= 0);
+    // Chain::verify returns the count (u64) of valid events in the chain.
+    let count = result.as_u64().expect("verify_chain returns a u64 count");
+    assert!(count >= 0);
 }
 ```
 
@@ -520,7 +582,7 @@ Expected: FAIL with "method `audit.query` not found" or "no route for `audit.que
 //! stored in `~/.local/share/blackglass/audit/chain.jsonl`.
 
 use crate::operator_server::{ClientId, Request, Response};
-use blackglass_audit::{Chain, VerifyReport};
+use blackglass_audit::Chain;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -532,7 +594,7 @@ pub enum AuditQueryError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
     #[error("audit: {0}")]
-    Audit(#[from] blackglass_audit::Error),
+    Audit(#[from] blackglass_audit::AuditError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -552,26 +614,29 @@ fn default_page_size() -> u32 {
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
     pub events: Vec<blackglass_audit::Event>,
-    pub total: u64,
+    pub total_matched: u64,
     pub page: u32,
     pub page_size: u32,
 }
 
 pub fn handle_query(chain: &Chain, params: QueryParams) -> Result<QueryResponse, AuditQueryError> {
-    let all = chain.query(&params.filter)?;
-    let total = all.len() as u64;
-    let start = (params.page as usize).saturating_mul(params.page_size as usize);
-    let end = (start + params.page_size as usize).min(all.len());
+    // Chain::query returns an AuditPage with all events for the filter
+    // and pagination applied. Pass the page/page_size straight through;
+    // the total_matched reflects the un-paginated match count.
+    let page = chain.query(&params.filter, params.page, params.page_size)?;
     Ok(QueryResponse {
-        events: all[start..end].to_vec(),
-        total,
+        events: page.events,
+        total_matched: page.total_matched,
         page: params.page,
         page_size: params.page_size,
     })
 }
 
-pub fn handle_verify(chain: &Chain) -> Result<VerifyReport, AuditQueryError> {
-    Ok(chain.verify_chain()?)
+pub fn handle_verify(chain_path: &Path) -> Result<u64, AuditQueryError> {
+    // Chain::verify is static and path-based; it returns the count of
+    // valid events. The operator server's dispatcher calls this with
+    // the path to the audit chain file.
+    Ok(Chain::verify(chain_path)?)
 }
 ```
 
@@ -586,8 +651,10 @@ In `crates/core/src/operator_server.rs`, find the `handle` function (or equivale
     jsonrpc_ok(req.id, serde_json::to_value(resp)?)
 }
 "audit.verify_chain" => {
-    let report = crate::audit_query::handle_verify(&chain)?;
-    jsonrpc_ok(req.id, serde_json::to_value(report)?)
+    // Chain::verify is static + path-based; pass the chain's file path
+    // (e.g. `state.audit_chain_path`).
+    let count = crate::audit_query::handle_verify(&state.audit_chain_path)?;
+    jsonrpc_ok(req.id, serde_json::to_value(count)?)
 }
 ```
 
@@ -684,8 +751,9 @@ async fn supervisor_emits_mcp_server_exited_audit_events() {
     let sup = McpSupervisor::start_with_chain(config, &log_path, &chain_path).await.unwrap();
     tokio::time::sleep(Duration::from_secs(8)).await;
     let chain = blackglass_audit::Chain::open(&chain_path).unwrap();
-    let events = chain.query(&serde_json::json!({})).unwrap();
-    let exited: Vec<_> = events.iter().filter(|e| matches!(e.kind, blackglass_audit::EventKind::McpServerExited { .. })).collect();
+    // Chain::query returns an AuditPage; events live at `.events`.
+    let page = chain.query(&serde_json::json!({ "kind": "all" }), 0, 1000).unwrap();
+    let exited: Vec<_> = page.events.iter().filter(|e| matches!(e.kind, blackglass_audit::EventKind::McpServerExited { .. })).collect();
     assert!(exited.len() >= 3, "expected >=3 McpServerExited events, got {}", exited.len());
     sup.shutdown().await;
 }
@@ -701,8 +769,8 @@ async fn supervisor_spawns_emits_mcp_server_spawned_audit_event() {
     let sup = McpSupervisor::start_with_chain(config, &log_path, &chain_path).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     let chain = blackglass_audit::Chain::open(&chain_path).unwrap();
-    let events = chain.query(&serde_json::json!({})).unwrap();
-    let spawned: Vec<_> = events.iter().filter(|e| matches!(e.kind, blackglass_audit::EventKind::McpServerSpawned { .. })).collect();
+    let page = chain.query(&serde_json::json!({ "kind": "all" }), 0, 1000).unwrap();
+    let spawned: Vec<_> = page.events.iter().filter(|e| matches!(e.kind, blackglass_audit::EventKind::McpServerSpawned { .. })).collect();
     assert_eq!(spawned.len(), 1);
     sup.shutdown().await;
 }
@@ -883,10 +951,16 @@ impl McpSupervisor {
         for spec in config.servers.iter() {
             let child = Self::spawn_child(spec, log_path).await?;
             let pid = child.id().unwrap_or(0);
-            chain.append(Event::new(EventKind::McpServerSpawned {
-                server: spec.name.clone(),
-                pid,
-            }))?;
+            chain.append(Event {
+                seq: 0, // Chain::append overwrites this from its internal counter.
+                ts: chrono::Utc::now().to_rfc3339(),
+                prev_hash: String::new(), // empty → Chain::append fills it from `self.last`
+                kind: EventKind::McpServerSpawned {
+                    server: spec.name.clone(),
+                    pid,
+                },
+                payload: json!({}),
+            })?;
             inner.write().await.insert(
                 spec.name.clone(),
                 ChildHandle {
@@ -966,11 +1040,17 @@ impl McpSupervisor {
                             ChildStatus::GivenUp { restart_count } => restart_count,
                         }).unwrap_or(0)
                     };
-                    chain.append(Event::new(EventKind::McpServerExited {
-                        server: spec.name.clone(),
-                        code,
-                        restart_count,
-                    })).ok();
+                    chain.append(Event {
+                        seq: 0, // Chain::append overwrites this from its internal counter.
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        prev_hash: String::new(), // empty → Chain::append fills it
+                        kind: EventKind::McpServerExited {
+                            server: spec.name.clone(),
+                            code,
+                            restart_count,
+                        },
+                        payload: json!({}),
+                    }).ok();
                     if restart_count >= max_restarts {
                         // Give up.
                         let mut guard = inner.write().await;
@@ -995,10 +1075,16 @@ impl McpSupervisor {
                     match Self::spawn_child(&spec, log_path).await {
                         Ok(new_child) => {
                             let pid = new_child.id().unwrap_or(0);
-                            chain.append(Event::new(EventKind::McpServerSpawned {
-                                server: spec.name.clone(),
-                                pid,
-                            })).ok();
+                            chain.append(Event {
+                                seq: 0, // Chain::append overwrites this from its internal counter.
+                                ts: chrono::Utc::now().to_rfc3339(),
+                                prev_hash: String::new(),
+                                kind: EventKind::McpServerSpawned {
+                                    server: spec.name.clone(),
+                                    pid,
+                                },
+                                payload: json!({}),
+                            }).ok();
                             let mut guard = inner.write().await;
                             if let Some(h) = guard.get_mut(&spec.name) {
                                 h.child = Some(new_child);
@@ -1371,8 +1457,9 @@ async fn end_to_end_mcp_run_emits_full_audit_chain() {
     // Give the audit chain a moment to flush.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let chain = blackglass_audit::Chain::open(&core.audit_chain_path).unwrap();
-    let events = chain.query(&json!({})).unwrap();
-    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    // Chain::query returns an AuditPage; events live at `.events`.
+    let page = chain.query(&json!({ "kind": "all" }), 0, 1000).unwrap();
+    let kinds: Vec<&str> = page.events.iter().map(|e| e.kind.as_str()).collect();
     assert!(kinds.contains(&"mcp_run_started"));
     assert!(kinds.contains(&"mcp_run_completed"));
     assert!(kinds.contains(&"action_executed"));
@@ -1624,10 +1711,10 @@ git commit -m "feat(core): operator-socket auth — gate all methods behind auth
 **Files:**
 - Modify: `crates/core/src/operator_server.rs`: broadcast new events to authenticated clients
 
-- [ ] **Step 1: Read the existing `Event::append` callsite**
+- [ ] **Step 1: Read the existing `chain.append` callsite**
 
-Run: `grep -rn "chain.append\|Event::new" crates/core/src/ | head`
-Expected: events are appended via `chain.append(Event::new(...))?`. The new work wraps this in a helper that also broadcasts to subscribers.
+Run: `grep -rn "chain.append" crates/core/src/ | head`
+Expected: events are appended via `chain.append(Event { ... })?` (struct-literal form — `Event` has public fields and is not constructed via `Event::new`). The new work wraps this in a helper that also broadcasts to subscribers.
 
 - [ ] **Step 2: Write the failing test for the live tail**
 
@@ -1642,7 +1729,17 @@ async fn audit_event_push_reaches_subscribed_clients() {
     let mut sub = client.subscribe("audit.event").await;
     // Trigger an event by appending one.
     let _ = client.notify("audit.append", json!({
-        "event": Event::new(EventKind::OperatorConfirmationRequested { id: "c1".into(), tool: "x".into(), args: "{}".into() })
+        "event": Event {
+            seq: 0,
+            ts: "2026-06-03T00:00:00Z".into(),
+            prev_hash: String::new(),
+            kind: EventKind::OperatorConfirmationRequested {
+                id: "c1".into(),
+                tool: "x".into(),
+                args: "{}".into(),
+            },
+            payload: json!({}),
+        }
     })).await.unwrap();
     // Wait for the push.
     let push: serde_json::Value = tokio::time::timeout(
