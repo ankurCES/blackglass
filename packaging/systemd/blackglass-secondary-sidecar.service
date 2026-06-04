@@ -1,0 +1,26 @@
+[Unit]
+Description=Blackglass secondary sidecar (deepfake detector)
+Documentation=man:blackglass-secondary-sidecar(1)
+# The sidecar doesn't depend on the core — it can come up first
+# or stay up across core restarts. The core talks to it over
+# loopback HTTP, so it tolerates the sidecar being down (the
+# detect tools will return verdict=unknown).
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/blackglass-secondary-sidecar
+Restart=on-failure
+RestartSec=10s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+AppArmorProfile=blackglass-secondary-sidecar
+# The sidecar has its own pytorch venv at
+# /usr/lib/blackglass/secondary-sidecar-venv/ — no operator
+# state on disk beyond secondary-sidecar.{log,state} which the
+# binary itself writes under ~/.local/share/blackglass/.
+
+[Install]
+WantedBy=default.target
