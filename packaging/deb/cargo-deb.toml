@@ -1,0 +1,35 @@
+[package]
+name = "blackglass"
+maintainer = "Blackglass <security@blackglass.dev>"
+copyright = "2024-2026, Blackglass"
+license-file = ["../../LICENSE"]
+section = "net"
+priority = "optional"
+depends = "$auto, libpolkit-gobject-1-0, adduser, policykit-1 | polkit, dbus, python3 (>= 3.12), uv, apparmor (>= 3.0), apparmor-utils"
+extended-description = """\
+Blackglass is a local-first, audit-logged security tool platform.
+This is the minimal package; install blackglass-core or blackglass-full
+for the upstream tool ecosystem."""
+assets = [
+  ["../../target/release/blackglass", "usr/bin/", "755"],
+  ["../../target/release/blackglass-core", "usr/bin/", "755"],
+  ["../../target/release/blackglass-polkit-helper", "usr/libexec/", "755"],
+  ["../../target/release/blackglass-mcp-osint", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-packets", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-ad", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-flipper", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-phish", "usr/bin/", "755"],
+  ["../../target/release/blackglass-mcp-detect", "usr/bin/", "755"],
+  ["../../app/dist", "usr/lib/blackglass/blackglass-ui/", "755"],
+  ["../../python/sidecar/src/blackglass_sidecar", "usr/share/blackglass/python/sidecar/src/blackglass_sidecar/", "755"],
+  ["../../python/sidecar/pyproject.toml", "usr/share/blackglass/python/sidecar/", "755"],
+  ["../../packaging/debian/blackglass-core.apparmor", "etc/apparmor.d/", "644"],
+  ["../../packaging/debian/blackglass-polkit-helper.apparmor", "etc/apparmor.d/", "644"],
+  ["../../packaging/debian/com.blackglass.policy", "usr/share/polkit-1/actions/", "644"],
+  ["../../packaging/debian/99-blackglass-flipper.rules", "lib/udev/rules.d/", "644"],
+  ["../../packaging/debian/blackglass.desktop", "usr/share/applications/", "644"],
+  ["../../packaging/cosign/cosign.pub", "usr/share/blackglass/cosign.pub", "644"],
+]
+
+[package.metadata.deb]
+name = "blackglass"

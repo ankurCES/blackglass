@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Blackglass
+GenericName=Security Chokepoint
+Comment=Local-first, audit-logged security tool platform
+Exec=blackglass ui %U
+Icon=blackglass
+Terminal=false
+Categories=Network;Security;
+StartupNotify=true
+Keywords=security;pentest;audit;

@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+# debian/rules for blackglass
+
+include /usr/share/dpkg/architecture.mk
+include /usr/share/dpkg/buildflags.mk
+
+%:
+	dh $@ --buildsystem=cargo
+
+override_dh_auto_build:
+	cargo build --release --workspace
+	# Build the Tauri frontend
+	cd app && npm ci && npm run build
+
+override_dh_auto_install:
+	cargo deb --install-path /usr --offline --no-build
