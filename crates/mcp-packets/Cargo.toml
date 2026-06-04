@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 blackglass-runtime = { path = "../runtime" }
+blackglass-python-bridge = { path = "../python-bridge" }
 rmcp.workspace = true
 tokio.workspace = true
 clap = { workspace = true, features = ["derive"] }
