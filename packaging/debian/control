@@ -12,13 +12,11 @@ Build-Depends:
  librsvg2-dev,
  libudev-dev,
  libdbus-1-dev,
- libpolkit-gobject-1-dev,
  python3 (>= 3.12),
  python3-dev,
  pkg-config,
  desktop-file-utils,
  appstream-util,
- cosign,
  uv,
  cargo-deb,
 Standards-Version: 4.6.2
@@ -30,9 +28,6 @@ Architecture: amd64
 Depends:
  ${misc:Depends},
  ${shlibs:Depends},
- libpolkit-gobject-1-0,
- adduser,
- policykit-1 | polkit,
  dbus,
  python3 (>= 3.12),
  uv,
@@ -42,6 +37,11 @@ Description: Blackglass analyst-mode security platform (no upstream tools)
  The blackglass security chokepoint, audit log, Tauri UI, and Python sidecar.
  Does NOT include any of the upstream pentest tool binaries. Install
  blackglass-full or a custom selection instead.
+ .
+ The core runs as a user-systemd service (no polkit, no /var/lib/blackglass,
+ no /var/run/blackglass). All operator state lives in
+ ~/.local/share/blackglass/. The Tauri UI is a single desktop binary that
+ speaks to the core over a Unix-domain socket.
 
 Package: blackglass-core
 Architecture: amd64
@@ -68,7 +68,6 @@ Depends:
  nuclei, subfinder, httpx, ffuf, whatweb, feroxbuster, theharvester,
  exploitdb, metasploit-framework, gophish,
  aircrack-ng, hcxdumptool, bettercap, cewl,
-Recommends: cosign
 Conflicts: blackglass-minimal, blackglass-core
 Description: Blackglass with all 27 upstream pentest tools (the full ecosystem)
  This is the canonical install for a clean Ubuntu 24.04 / Kali machine.

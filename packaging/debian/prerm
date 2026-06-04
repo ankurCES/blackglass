@@ -1,32 +1,22 @@
 #!/bin/bash
 set -e
 
-# 1. Unload AppArmor profiles
-if command -v apparmor_parser >/dev/null; then
-    apparmor_parser -R /etc/apparmor.d/blackglass-core || true
-fi
-
-# 2. debconf prompt for engagement data removal
-. /usr/share/debconf/confmodule
-db_input high blackglass/remove_data || true
-db_go || true
-db_get blackglass/remove_data
-if [ "$RET" = "true" ]; then
-    rm -rf /var/lib/blackglass
-fi
-
-# 3. Remove blackglass group if empty
-if getent group blackglass >/dev/null; then
-    members=$(getent group blackglass | cut -d: -f4)
-    if [ -z "$members" ]; then
-        delgroup --system blackglass || true
+# 1. Best-effort: disable + stop the user-systemd services.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && command -v systemctl >/dev/null; then
+    USER_NAME="${SUDO_USER:-$(id -un)}"
+    if [ "$USER_NAME" != "root" ] && id "$USER_NAME" >/dev/null 2>&1; then
+        su - "$USER_NAME" -c "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR systemctl --user disable blackglass-core.service blackglass-secondary-sidecar.service" 2>/dev/null || true
+        su - "$USER_NAME" -c "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR systemctl --user stop blackglass-core.service blackglass-secondary-sidecar.service" 2>/dev/null || true
     fi
 fi
 
-# 4. Remove operator from group (best-effort)
-REAL_USER="${SUDO_USER:-}"
-if [ -n "$REAL_USER" ]; then
-    deluser "$REAL_USER" blackglass 2>/dev/null || true
+# 2. Unload AppArmor profiles.
+if command -v apparmor_parser >/dev/null; then
+    apparmor_parser -R /etc/apparmor.d/blackglass-core 2>/dev/null || true
+    apparmor_parser -R /etc/apparmor.d/blackglass-secondary-sidecar 2>/dev/null || true
 fi
+
+# dh_installdeb will replace this with the standard conffiles + state-dirs cleanup.
+#DEBHELPER#
 
 exit 0
