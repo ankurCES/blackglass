@@ -7,10 +7,22 @@ set -euo pipefail
 
 # Parse args
 VARIANT="full"
+DISTRO_OVERRIDE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --minimal|--core|--full)
             VARIANT="${1#--}"
+            shift
+            ;;
+        --ubuntu|--kali|--debian)
+            # Force the distro identity past the /etc/os-release check.
+            # Use this when you've customised /etc/os-release (e.g. a
+            # modified Ubuntu where ID is no longer "ubuntu") but you
+            # know the system is still deb-based and AppArmor-enabled.
+            # You are asserting the install is safe to run as if it
+            # were a stock ${1#--} install. The downstream apt-get
+            # calls will fail loudly if your assertion is wrong.
+            DISTRO_OVERRIDE="${1#--}"
             shift
             ;;
         *)
@@ -21,12 +33,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 1. Detect distro
-DISTRO=$(. /etc/os-release && echo "${ID:-}")
-case "$DISTRO" in
-    ubuntu|kali|debian) ;;
-    *) echo "unsupported distro: $DISTRO (need Ubuntu 24.04+, Kali, or Debian 12+)" >&2; exit 1 ;;
-esac
-echo "✓ detected distro: $DISTRO"
+if [[ -n "$DISTRO_OVERRIDE" ]]; then
+    DISTRO="$DISTRO_OVERRIDE"
+    echo "⚠ distro forced to '$DISTRO' via --$DISTRO_OVERRIDE (skipping /etc/os-release check)"
+    echo "  you are responsible for ensuring this is a real $DISTRO system with AppArmor + apt"
+else
+    DISTRO=$(. /etc/os-release && echo "${ID:-}")
+    case "$DISTRO" in
+        ubuntu|kali|debian) ;;
+        *) echo "unsupported distro: $DISTRO (need Ubuntu 24.04+, Kali, or Debian 12+)" >&2
+           echo "  hint: if you have a customised /etc/os-release but are still on a deb-based"
+           echo "  system, re-run with --ubuntu / --kali / --debian to override." >&2
+           exit 1 ;;
+    esac
+    echo "✓ detected distro: $DISTRO"
+fi
 
 # 2. AppArmor precheck
 if ! command -v aa-enabled >/dev/null; then

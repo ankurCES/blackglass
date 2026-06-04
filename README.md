@@ -13,6 +13,11 @@ confinement + polkit privilege drop + udev rules for the Flipper.
 # 1. Install (Ubuntu 24.04, Kali, Debian 12+)
 curl -sSfL https://raw.githubusercontent.com/ankurCES/blackglass/master/packaging/install.sh | sudo bash -s -- --full
 
+# If your /etc/os-release has been modified (e.g. a customised Ubuntu
+# whose ID is no longer "ubuntu"), you can override the distro check:
+#   ... | sudo bash -s -- --ubuntu --full
+# Valid overrides: --ubuntu, --kali, --debian.
+
 # 2. Initialize your first profile
 blackglass profile init
 
