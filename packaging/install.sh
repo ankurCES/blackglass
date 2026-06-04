@@ -92,12 +92,21 @@ if [[ "$http_code" != "200" ]]; then
          https://github.com/ankurCES/blackglass/releases
        (re-run this installer once a release is cut)
 
-    2. Build from source instead:
+    2. Build from source instead — see the README, section
+       "Build from source":
+         https://github.com/ankurCES/blackglass#build-from-source
+       The short version:
          git clone https://github.com/ankurCES/blackglass
          cd blackglass
          sudo apt-get install -y cargo rustc nodejs npm cargo-deb
+         cargo build --workspace
+         ( cd app && npm install && npm run build )
          cargo run -p xtask -- deb --variants full
          sudo apt-get install -y ./target/debian/blackglass-full_*_amd64.deb
+
+       Then follow the "First launch walkthrough" section in the
+       README:
+         https://github.com/ankurCES/blackglass#first-launch-walkthrough
 
   Both paths get you the same code. Option 2 skips the SHA-256 check
   because the build-from-source artifact is trusted by construction
@@ -132,14 +141,17 @@ cat <<EOF
 
 blackglass ${version} installed.
   UI:           blackglass ui
-  Audit log:    ~/.local/share/blackglass/audit/chain.jsonl
+  Audit log:    ~/.local/share/blackglass/audit/audit.jsonl
   Socket:       ~/.local/share/blackglass/runtime.sock
   Re-install:   curl -sSfL https://blackglass.dev/install.sh | sudo bash
 
 If you have a Flipper, log out and back in for the udev group to
 take effect (the postinst added you to it).
 
-To verify the install, run:
-  sudo xtask confinement-test
-  sudo xtask verify-install
+To verify the install, run (from a source checkout):
+  cargo run -p xtask -- verify-install
+  sudo cargo run -p xtask -- confinement-test
+
+To verify the audit chain:
+  blackglass audit verify
 EOF
