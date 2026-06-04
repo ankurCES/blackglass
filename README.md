@@ -79,6 +79,13 @@ cargo build --workspace
 cargo run -p xtask -- deb --variants full
 ```
 
+> The `app/pnpm build` step is what populates `app/dist/`, which
+> `tauri::generate_context!()` bakes into the `blackglass-app`
+> binary at compile time. The Tauri build script (`app/src-tauri/
+> build.rs`) will auto-run it on a clean checkout — you only need
+> to run it manually if you're iterating on the frontend and
+> want to see Vite output directly.
+
 The .deb lands at `target/debian/blackglass_*_amd64.deb`.
 
 ### Install the local .deb
