@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <action id="com.blackglass.start-core">
+    <description>Start the blackglass security chokepoint</description>
+    <message>Authentication is required to start the blackglass core.</message>
+    <icon_name>blackglass</icon_name>
+    <defaults>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/blackglass-polkit-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">false</annotate>
+  </action>
+</policyconfig>

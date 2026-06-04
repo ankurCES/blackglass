@@ -1,0 +1,92 @@
+#!/bin/bash
+set -e
+
+# 1. Refuse to install on a system without AppArmor
+if ! command -v aa-enabled >/dev/null; then
+    echo "blackglass requires AppArmor. Please install apparmor and apparmor-utils." >&2
+    exit 1
+fi
+if ! aa-enabled --quiet 2>/dev/null; then
+    echo "blackglass requires AppArmor to be enabled in the kernel." >&2
+    exit 1
+fi
+
+# 2. Create the blackglass group (system group, no login)
+if ! getent group blackglass >/dev/null; then
+    addgroup --system blackglass
+fi
+
+# 3. Set up /var/lib/blackglass (engagement data)
+install -d -m 0750 -o root -g blackglass /var/lib/blackglass
+install -d -m 0750 -o root -g blackglass /var/lib/blackglass/evidence
+install -d -m 0750 -o root -g blackglass /var/lib/blackglass/evidence/python-errors
+install -d -m 0750 -o root -g blackglass /var/lib/blackglass/reports
+install -d -m 0755 /var/run/blackglass
+
+# 4. Install AppArmor profiles
+for f in /etc/apparmor.d/blackglass-core /etc/apparmor.d/blackglass-polkit-helper; do
+    if [ -f "$f" ]; then
+        apparmor_parser -r "$f" || {
+            echo "Failed to load $f. Refusing to continue." >&2
+            exit 1
+        }
+    fi
+done
+
+# 5. Reload udev rules for the Flipper
+if command -v udevadm >/dev/null; then
+    udevadm control --reload-rules
+fi
+
+# 6. Update the desktop + icon caches
+if command -v update-desktop-database >/dev/null; then
+    update-desktop-database /usr/share/applications
+fi
+if command -v gtk-update-icon-cache >/dev/null; then
+    gtk-update-icon-cache -f /usr/share/icons/hicolor
+fi
+
+# 7. Build the Python venv (idempotent — skips if already present)
+if [ ! -d /usr/lib/blackglass/python-venv ]; then
+    echo "Building Python sidecar venv (this takes a minute)..."
+    {
+        uv venv /usr/lib/blackglass/python-venv --python python3.12
+        uv pip install \
+          --python /usr/lib/blackglass/python-venv/bin/python \
+          /usr/share/blackglass/python/sidecar/
+        /usr/lib/blackglass/python-venv/bin/python -c "
+            import blackglass_sidecar.scapy_bridge
+            import blackglass_sidecar.impacket_bridge
+            import blackglass_sidecar.hardware_bridge
+            import blackglass_sidecar.audit_types
+            print('sidecar venv OK')
+        "
+    } > /var/lib/blackglass/evidence/sidecar-build.log 2>&1 || {
+        echo "Sidecar venv build failed. See /var/lib/blackglass/evidence/sidecar-build.log" >&2
+        rm -rf /usr/lib/blackglass/python-venv
+        exit 1
+    }
+    chmod 0750 /usr/lib/blackglass/python-venv
+    chown -R root:blackglass /usr/lib/blackglass/python-venv
+fi
+
+# 8. Add the operator (SUDO_USER) to the blackglass group (best-effort)
+REAL_USER="${SUDO_USER:-}"
+if [ -n "$REAL_USER" ]; then
+    if ! getent group blackglass | grep -q "\b${REAL_USER}\b"; then
+        adduser "$REAL_USER" blackglass 2>/dev/null || true
+    fi
+fi
+
+# 9. Print next steps
+cat <<EOF
+blackglass installed.
+
+Next steps:
+  1. Log out and back in (so the 'blackglass' group takes effect).
+  2. Initialize your first profile:  blackglass profile init
+  3. Launch the UI:                   blackglass ui
+
+The audit log is at: ~/.local/share/blackglass/audit/audit.jsonl
+To re-run the install:                curl -sSfL https://blackglass.dev/install.sh | sudo bash
+EOF

@@ -8,6 +8,7 @@ use blackglass_core::sanitizer::RealSanitizer;
 use blackglass_core::server::Server;
 use blackglass_engagement::Engagement;
 use blackglass_profile::Profile;
+use blackglass_python_bridge::{BridgeKind, PythonBridge};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +30,22 @@ enum Cmd {
         audit: String,
         #[arg(long, default_value = "spine-token")]
         token: String,
+        /// Python sidecar bridge kind: `stub` (default, in-process) or
+        /// `real` (pyo3-backed; requires the `real` feature and a working
+        /// venv). Unknown values fall back to `stub`.
+        #[arg(long, default_value = "stub", value_parser = parse_bridge_kind)]
+        python_bridge: BridgeKind,
+        /// Path to a Python binary (used when `--python-bridge=real`).
+        /// Optional; currently informational — `RealBridge` is selected
+        /// at compile time and the sidecar venv is found via
+        /// `BLACKGLASS_EVIDENCE_DIR` / default locations.
+        #[arg(long)]
+        python_bin: Option<PathBuf>,
     },
+}
+
+fn parse_bridge_kind(s: &str) -> Result<BridgeKind, String> {
+    Ok(BridgeKind::from_str_loose(s))
 }
 
 fn expand(p: &str) -> PathBuf {
@@ -51,7 +67,13 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Start { socket, audit, token } => {
+        Cmd::Start { socket, audit, token, python_bridge, python_bin } => {
+            // Currently informational only — RealBridge does not consume
+            // a path. Kept as a CLI flag so the postinst and packaging
+            // can plumb a path through later without breaking callers.
+            if let Some(ref p) = python_bin {
+                tracing::debug!(?p, "python_bin provided (currently unused)");
+            }
             let socket = expand(&socket);
             let audit = expand(&audit);
             if let Some(parent) = audit.parent() {
@@ -77,6 +99,29 @@ async fn main() -> Result<()> {
             let channel = ConfirmChannel::new();
             let gate3: Arc<dyn blackglass_core::gates::Gate3> =
                 Arc::new(BrokerGate3::new_anonymous(broker.clone(), channel.clone()));
+            // Construct the Python sidecar bridge. Default is the in-process
+            // stub; `--python-bridge=real` requires the `real` feature on
+            // blackglass-python-bridge. `--python-bin` is accepted but the
+            // current RealBridge does not consume a path — it loads the
+            // sidecar from the active Python interpreter's sys.path.
+            let python_bridge_impl: Option<Arc<dyn PythonBridge>> = match python_bridge {
+                BridgeKind::Stub => {
+                    tracing::info!("python bridge: stub (no sidecar)");
+                    Some(blackglass_python_bridge::build(BridgeKind::Stub))
+                }
+                #[cfg(feature = "real")]
+                BridgeKind::Real => {
+                    tracing::info!(?python_bin, "python bridge: real (pyo3)");
+                    Some(blackglass_python_bridge::build(BridgeKind::Real))
+                }
+                #[cfg(not(feature = "real"))]
+                BridgeKind::Real => {
+                    tracing::warn!(
+                        "python bridge: real requested but `real` feature is disabled; using stub"
+                    );
+                    Some(blackglass_python_bridge::build(BridgeKind::Stub))
+                }
+            };
             let cp = Chokepoint::new(
                 chain,
                 profile,
@@ -84,7 +129,8 @@ async fn main() -> Result<()> {
                 gate3,
                 Arc::new(RealSanitizer::new(100 * 1024, evidence_dir.clone())),
             )
-            .with_evidence_dir(evidence_dir);
+            .with_evidence_dir(evidence_dir)
+            .with_python_bridge(python_bridge_impl);
             // Sub-plan 3: operator socket (Tauri UI). Runs concurrently with
             // the runtime socket accept loop below. We pass it the same
             // broker (to resolve confirmations) and the same channel (to

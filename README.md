@@ -1,103 +1,129 @@
 # blackglass
 
-Linux-native, AI-invokable, audit-first red-team platform.
+A local-first, audit-logged security tool platform.
 
-A single authorized operator gets a unified desktop UI and a guarded Model
-Context Protocol (MCP) surface over the modern offensive-security toolchain,
-with tiered capability profiles so the public release can be widely distributed
-without it becoming a script-kiddie weapon.
+Every upstream pentest tool goes through a chokepoint that writes to a
+tamper-evident, hash-chained audit log. The Tauri desktop app is the only
+UI. The Python sidecar handles tools that need raw sockets. AppArmor
+confinement + polkit privilege drop + udev rules for the Flipper.
+
+## Quickstart
+
+```bash
+# 1. Install (Ubuntu 24.04, Kali, Debian 12+)
+curl -sSfL https://blackglass.dev/install.sh | sudo bash
+
+# 2. Initialize your first profile
+blackglass profile init
+
+# 3. Launch the UI
+blackglass ui
+```
+
+That's it. The audit log is at `~/.local/share/blackglass/audit/audit.jsonl`.
 
 ## Status
-
-**Sub-plans 1 (spine) and 2 (Gate 4 + first MCP servers) are complete and green.**
 
 | Sub-plan | Status | What it ships |
 |---|---|---|
 | 1 — spine | ✅ complete | cargo workspace, `blackglass-{audit,profile,engagement,ipc,core,cli,runtime}`, 4-gate chokepoint, hash-chained audit, JSON-RPC over Unix socket, CLI |
 | 2 — Gate 4 + mcp-{osint,packets} | ✅ complete | prompt-injection sanitizer wired into the chokepoint, `osint-{whois,dig}`, `packets-{tshark_read,tshark_capture,pcap_export,scapy_craft_stub}` |
-| 3 | ⏳ next | TBD |
-| 4 | ⏳ | TBD |
+| 3 — Gate 3 + operator server | ✅ complete | operator confirmation chokepoint wired end-to-end; 66 tests passing |
+| 4 — desktop + sidecar + .deb | ✅ complete | Tauri UI foundation, Python sidecar scaffold, AppArmor profiles, polkit helper, cosign-signed .deb pipeline, 90 tests passing |
 
 ## Architecture
 
 ```
-                                    ┌──────────────────┐
-                                    │   operator UI    │
-                                    │  (Tauri, future) │
-                                    └────────┬─────────┘
-                                             │ JSON-RPC over Unix socket
-                                             │ (auth → execute_action)
-                                             ▼
-┌──────────────────────────────────────────────────────────────┐
-│                          blackglass-core                     │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │  chokepoint:  execute_action(req)                       │ │
-│  │     ├─ Gate 1:  profile.allowed_domain × action.domain   │ │
-│  │     ├─ Gate 2:  engagement.target ∈ allowlist            │ │
-│  │     ├─ Gate 3:  operator confirmation (stub AllowAll)    │ │
-│  │     └─ Gate 4:  sanitize downstream output (PI-strip)    │ │
-│  │            ↓                                             │ │
-│  │     simulate_execute  (stub: real tools in sub-plan 4)   │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│             ↓ ↓ ↓                                            │
-│  ┌────────────────────┐    every action emits 3 events:     │
-│  │  blackglass-audit  │ ◀──── ActionRequested               │
-│  │  blake3 hash-chain │       ActionAllowed | ActionDenied  │
-│  │  tamper-evident    │       ActionExecuted                │
-│  └────────────────────┘                                       │
-└──────────────────────────────────────────────────────────────┘
-                                             ▲
-                                             │ JSON-RPC (auth-gated)
-                                             │
-                ┌────────────────────────────┴────────────────────────┐
-                │                                                     │
-        ┌───────┴────────┐                                   ┌────────┴───────┐
-        │ blackglass-mcp │                                   │  blackglass-   │
-        │     -osint     │                                   │    packets     │
-        │ whois, dig     │                                   │ tshark, pcap   │
-        └────────────────┘                                   └────────────────┘
+┌────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│  mcp-{osint,   │    │  blackglass-core │    │  Python sidecar  │
+│   packets,...} ├───►│  (Rust, the gate)├────►│  (scapy,         │
+│  6 thin clients│    │                  │    │   impacket)      │
+└────────────────┘    └──────────────────┘    └──────────────────┘
+        │                       │                      │
+        │                       ▼                      │
+        │              ┌──────────────────┐            │
+        │              │  audit chain     │            │
+        │              │  (JSONL+blake3)  │            │
+        │              └──────────────────┘            │
+        │                       │                      │
+        │                       ▼                      │
+        │              ┌──────────────────┐            │
+        │              │  Tauri UI        │            │
+        │              │  (audit browser) │            │
+        │              └──────────────────┘            │
+        │                                              │
+        └──────────────► nmap, tshark, ... ◄───────────┘
+                        (upstream tool binaries)
 ```
 
-## The four gates
+### The four gates
 
 1. **Gate 1 — profile.** Profile lists allowed domains (e.g., `core`, `osint`, `packets`, `audit`) and allowed action classes (e.g., `read_only`, `destructive`). Reject before the request gets a footprint.
 2. **Gate 2 — engagement scope.** Engagement file (TOML) lists allowed targets as IP / CIDR / hostname. Reject anything out of scope. This is the chokepoint that stops an LLM-driven agent from scanning the wrong network.
-3. **Gate 3 — operator confirmation.** Reserved for "this action is destructive — confirm in the UI" prompts. Stubbed as `AllowAll` in sub-plan 1.
+3. **Gate 3 — operator confirmation.** "This action is destructive — confirm in the UI" prompts. The operator_server binary surfaces the prompt over a Unix socket; the Tauri UI consumes it.
 4. **Gate 4 — output sanitization.** Downstream tool output passes through PI-strip, length-truncation, and wrap-with-delimiters. Every redacted line is logged as `PromptInjectionSuspected` evidence.
 
 Every gate decision is written to the hash-chained audit log **before** the request continues. Tampering with the log invalidates the chain.
 
-## Build & test
+## Development
 
-```sh
-rustup show                           # 1.95 per rust-toolchain.toml
-cargo test --workspace                # 47 passed, 0 failed, 1 ignored (live tshark)
-cargo clippy --workspace --all-targets -- -D warnings
+```bash
+# Build everything
+cargo build --workspace
+cd app && npm install && npm run build
+
+# Run the test suite
+cargo test --workspace
+
+# Build a .deb
+cargo run -p xtask -- deb --variants full
+
+# Verify a fresh install meets the security prerequisites
+sudo cargo run -p xtask -- verify-install
+
+# Run the confinement test
+sudo cargo run -p xtask -- confinement-test
 ```
 
 ## Layout
 
 ```
 crates/
-  audit/         # blake3 hash-chained JSONL log + Chain::verify
-  profile/       # TOML profile + Gate 1 helpers
-  engagement/    # TOML engagement + Gate 2 allowlist (IP/CIDR/hostname)
-  ipc/           # 4-byte-BE length-prefixed JSON-RPC codec
-  core/          # chokepoint, gates, RPC dispatch, unix-socket server
-  cli/           # init | ping | audit-verify
-  runtime/       # GateClient — async auth + execute_action over Unix socket
-  mcp-osint/     # osint-whois, osint-dig
-  mcp-packets/   # tshark_read, tshark_capture, pcap_export, scapy_craft_stub
-docs/
-  specs/         # design spec
-  plans/         # sub-plan 1 implementation plan
+  audit/                # blake3 hash-chained JSONL log + Chain::verify
+  profile/              # TOML profile + Gate 1 helpers
+  engagement/           # TOML engagement + Gate 2 allowlist (IP/CIDR/hostname)
+  ipc/                  # 4-byte-BE length-prefixed JSON-RPC codec
+  core/                 # chokepoint, gates, RPC dispatch, unix-socket server
+  cli/                  # init | ping | audit-verify
+  runtime/              # GateClient — async auth + execute_action over Unix socket
+  mcp-osint/            # osint-whois, osint-dig
+  mcp-packets/          # tshark_read, tshark_capture, pcap_export, scapy_craft_stub
+  python-bridge/        # pyo3-gated trait for scapy/impacket/pyflipper calls
+  polkit-helper/        # root-only exec shim that re-checks every polkit grant
+  xtask/                # build orchestrator: build, deb, sign, verify-install, confinement-test
+packaging/
+  debian/               # control, rules, .desktop, postinst, prerm
+  apparmor/             # profiles for core + polkit-helper
+  polkit/               # com.blackglass.start-core policy
+  udev/                 # 99-blackglass-flipper.rules
+  cosign/               # pinned public-key for curl|sh install
+  install.sh            # one-line installer
+  installer/            # detect-distro, verify-cosign, apt-install helpers
+scripts/
+  smoke-test.sh         # 7-criterion install smoke test
 ```
 
 ## Security
 
-See `docs/specs/2026-06-03-blackglass-design.md` for the full threat model.
-The local socket auth model (ADR 0004) is "first RPC on every connection must
-be `auth` carrying a 32-byte token; server refuses all other methods until
-auth succeeds." The token lives in a 0600 file generated by `blackglass init`.
+Read `docs/security.md` for the threat model, the kill-switch list, and
+the secure-update mechanism. Read `docs/spec.md` for the full design.
+
+The install flow uses cosign keyless signing (OIDC, tied to the
+release GitHub Actions workflow). The pinned public-key fingerprint
+lives at `packaging/cosign/cosign.pub`.
+
+## License
+
+MIT.
 
 This is offensive-security software. Read the spec before you run it.

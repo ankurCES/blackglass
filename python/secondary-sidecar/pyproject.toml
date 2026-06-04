@@ -1,0 +1,17 @@
+[project]
+name = "blackglass-secondary"
+version = "0.1.0"
+description = "Blackglass secondary sidecar — deepfake detection"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    # v1.1 will add: Pillow, torch, mesonet-weights
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blackglass_secondary"]

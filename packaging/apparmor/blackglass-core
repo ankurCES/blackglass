@@ -1,0 +1,58 @@
+#include <tunables/global>
+
+# blackglass-core — the chokepoint.
+# Confinement model: the core can read user config, write the audit log
+# and engagement evidence, and use the network for upstream tool calls.
+# It cannot write to system directories or read other users' files.
+
+profile blackglass-core flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  # Binaries the core itself runs
+  /usr/bin/blackglass-core              mr,
+  /usr/bin/blackglass-mcp-*             mrix,
+  /usr/bin/nmap                         mrix,
+  /usr/bin/tshark                       mrix,
+  /usr/bin/dig                          mrix,
+  /usr/bin/whois                        mrix,
+  /usr/bin/curl                         mrix,
+  /usr/bin/python3*                     mrix,
+  /usr/lib/blackglass/**                mr,
+  /usr/share/blackglass/**              mr,
+
+  # Config
+  /etc/blackglass/**                    r,
+  /etc/apparmor.d/blackglass-core       r,
+
+  # Operator home (read + write)
+  owner @{HOME}/.local/share/blackglass/**     rwk,
+  owner @{HOME}/.config/blackglass/**         rwk,
+
+  # Engagement data
+  /var/lib/blackglass/**                rwk,
+  /var/lib/blackglass/evidence/**       rwk,
+  /var/lib/blackglass/evidence/python-errors/** rwk,
+
+  # Runtime state
+  /var/run/blackglass/**                rwk,
+  /var/run/blackglass/core.pid          w,
+
+  # Network
+  network inet  stream,
+  network inet6 stream,
+  network unix  stream,
+  network netlink raw,
+
+  # Deny all writes to system paths
+  deny /etc/**                         w,
+  deny /usr/**                         w,
+  deny /boot/**                        w,
+  deny /home/*/.ssh/**                 r,
+  deny ptrace,
+  deny mount,
+
+  # Subprocesses inherit this profile — already covered by 'i' in mrix
+  # flags on each binary entry above. No standalone rule needed.
+}

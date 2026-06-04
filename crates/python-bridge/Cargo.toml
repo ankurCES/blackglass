@@ -1,0 +1,26 @@
+[package]
+name = "blackglass-python-bridge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Stub by default — no pyo3, no Python toolchain required to build.
+default = []
+# `real` enables the pyo3-backed bridge. Requires maturin/pip install
+# of the sidecar package; build is broken without that step.
+real = ["pyo3"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+pyo3 = { version = "0.23", optional = true, features = ["auto-initialize"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

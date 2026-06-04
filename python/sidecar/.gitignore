@@ -1,0 +1,3 @@
+python/sidecar/.gitignore
+__pycache__/
+*.pyc

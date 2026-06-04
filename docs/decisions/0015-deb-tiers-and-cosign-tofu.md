@@ -1,0 +1,21 @@
+# ADR 0015: Three meta-packages + cosign keyless signing for install flow
+
+- Status: Accepted (sub-plan 4)
+- Context: spec §7.2 lists 27 upstream tools that the full blackglass install pulls in (nmap, masscan, impacket-scripts, evilginx2, gophish, mitmproxy, etc.). Not every user wants every tool — an analyst doing OSINT does not need `evilginx2` on disk; a red-teamer does. A single monolithic `blackglass-full` .deb would (a) force all-or-nothing installation, (b) bloat the install for users with narrow scope, and (c) make the supply-chain attack surface the same for everyone. Separately, the install flow needs a verifiable trust anchor so users can confirm the .deb they downloaded is the one we built.
+- Decision:
+  - **Three meta-packages** that depend on progressively larger tool sets:
+    - `blackglass-minimal` — 0 upstream tools, just the core + UI + sidecar skeleton. For OSINT-only / read-only analysts.
+    - `blackglass-core` — 4 upstream tools (nmap, tshark, masscan, scapy). For network/packet analysts.
+    - `blackglass-full` — all 27 upstream tools from spec §7.2. The default when the user runs `install.sh` with no flags. For red-teamers / full-scope engagements.
+  - The install script (`packaging/install.sh`) defaults to `full` but accepts `--tier minimal|core|full`. Each tier is a separate apt meta-package so users can `apt install blackglass-minimal` and `apt install blackglass-full` side-by-side or upgrade in place.
+  - **Cosign keyless signing** for the .deb itself. The first install pins a cosign public key from `packaging/cosign/cosign.pub`; the install script runs `cosign verify-blob` against the .deb before installing. Subsequent upgrades go through apt and the same key is used transitively. This is TOFU — paid once on first install, amortized forever after.
+- Consequences:
+  - Clean upgrade story: apt handles the chain, cosign pays the TOFU cost on day one.
+  - Deliberate v1 scope: the meta-packages target Ubuntu 24.04 + Kali (apt-based). Other distros are out of scope for v1; users on Fedora/Arch use the source build.
+  - The cosign public key becomes a long-lived trust anchor. Key rotation is a one-line PR to `packaging/cosign/cosign.pub` and a release-notes entry; existing users re-verify on next install.
+  - 27 upstream tools means 27 supply-chain trust edges. We do not re-sign upstream binaries; we trust the distro package maintainers. The cosign signature is over **our** .deb only.
+  - The installer refuses to proceed if `cosign verify-blob` fails. There is no `--insecure` flag.
+- Alternatives:
+  - One monolithic .deb, no tiers (rejected: forces all-or-nothing, bloats the install for narrow-scope users).
+  - Conda/pip-based install with no system package (rejected: violates §3.3's confinement requirements — we need apt for AppArmor/polkit/udev integration).
+  - GPG signing instead of cosign (rejected: keyless + transparency log is a stronger primitive; cosign keys are easier to rotate via Sigstore).
