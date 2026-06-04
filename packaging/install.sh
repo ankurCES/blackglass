@@ -74,15 +74,47 @@ if ! command -v cosign >/dev/null; then
 fi
 echo "✓ cosign is available"
 
+# Set up a tmpdir for downloads and bind cleanup to EXIT so we don't
+# leak .deb artifacts on failure paths. Created here (before the API
+# call) so the release.json can be saved into it for inspection.
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
 # 4. Fetch the latest release metadata
 echo "Fetching latest release info..."
-release_json=$(curl -sSfL https://api.github.com/repos/ankurCES/blackglass/releases/latest)
-version=$(echo "$release_json" | jq -r .tag_name)
+http_code=$(curl -sS -o "$tmpdir/release.json" -w "%{http_code}" \
+    https://api.github.com/repos/ankurCES/blackglass/releases/latest || echo "000")
+release_json_file="$tmpdir/release.json"
+if [[ "$http_code" != "200" ]]; then
+    cat >&2 <<EOF
+✗ could not find a published release for ankurCES/blackglass (HTTP $http_code).
+
+  The GitHub API returns 404 when the repository has zero published
+  releases. The blackglass release pipeline is not yet wired up
+  end-to-end (xtask's 'sign' subcommand is a Phase-4 stub), so no
+  cosign-signed .deb has been attached to a release yet.
+
+  What you can do:
+    1. Watch for the first release:
+         https://github.com/ankurCES/blackglass/releases
+       (re-run this installer once a release is cut)
+
+    2. Build from source instead:
+         git clone https://github.com/ankurCES/blackglass
+         cd blackglass
+         sudo apt-get install -y cargo rustc nodejs npm cargo-deb
+         cargo run -p xtask -- deb --variants full
+         sudo apt-get install -y ./target/debian/blackglass-full_*_amd64.deb
+
+  Either path gets you the same code, but option 2 skips the cosign
+  verification because there is no signature to verify yet.
+EOF
+    exit 1
+fi
+version=$(jq -r .tag_name < "$release_json_file")
 asset_base="https://github.com/ankurCES/blackglass/releases/download/$version"
 
 # 5. Download the .deb and its signature
-tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT
 deb_basename="blackglass-${VARIANT}_${version#v}_amd64.deb"
 echo "Downloading $deb_basename..."
 curl -sSfL -o "$tmpdir/$deb_basename"   "$asset_base/$deb_basename"
