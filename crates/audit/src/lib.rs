@@ -41,6 +41,9 @@ pub enum EventKind {
     PromptInjectionSuspected,
     OperatorConfirmationRequested,
     OperatorConfirmationResolved,
+    PythonBridgeInvoked,
+    PythonBridgeFailed,
+    PythonBridgeEvidenceDumped,
     #[serde(other)]
     Other,
 }
