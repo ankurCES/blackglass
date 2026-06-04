@@ -1,8 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { state } from "./lib/state.svelte";
+  import { state, workspace, selectDomain, setLastResult, openAuditDetail, closeAuditDetail } from "./lib/state.svelte";
   import { listenForOperatorEvents } from "./lib/operator";
   import ConfirmModal from "./lib/ConfirmModal.svelte";
+  import DomainRail from "./lib/DomainRail.svelte";
+  import ToolRunner from "./lib/ToolRunner.svelte";
+  import ResultPane from "./lib/ResultPane.svelte";
+  import AuditDetail from "./lib/AuditDetail.svelte";
 
   let unsubscribe: (() => void) | undefined;
 
@@ -33,28 +37,81 @@
   let head = $derived(state.pending[0]);
 </script>
 
-<main class="h-full flex flex-col">
-  <header class="border-b border-border px-4 py-2 flex items-center justify-between">
-    <h1 class="text-sm tracking-wider">blackglass</h1>
-    <div class="text-xs">
+<div class="app">
+  <header class="topbar">
+    <h1>blackglass</h1>
+    <div class="conn">
       {#if state.conn === "connected"}
-        <span class="text-ok">● connected</span>
+        <span class="ok">● connected</span>
       {:else if state.conn === "connecting"}
-        <span class="text-accent">● connecting…</span>
+        <span class="accent">● connecting…</span>
       {:else}
-        <span class="text-danger">● disconnected</span>
+        <span class="danger">● disconnected</span>
       {/if}
     </div>
   </header>
-  <section class="flex-1 grid place-items-center text-muted text-sm">
-    {#if state.pending.length === 0}
-      <p>Waiting for confirmation requests.</p>
-    {:else}
-      <p>{state.pending.length} pending</p>
-    {/if}
-  </section>
-</main>
+  <div class="workspace">
+    <DomainRail
+      selected={workspace.selectedDomain}
+      onSelect={selectDomain}
+    />
+    <main class="middle">
+      <ToolRunner
+        domain={workspace.selectedDomain}
+        onRun={setLastResult}
+      />
+    </main>
+    <ResultPane
+      result={workspace.lastResult}
+      onAuditClick={openAuditDetail}
+    />
+  </div>
+</div>
 
 {#if head}
   <ConfirmModal request={head} />
 {/if}
+
+{#if workspace.auditDetailEventId}
+  <AuditDetail
+    eventId={workspace.auditDetailEventId}
+    onClose={closeAuditDetail}
+  />
+{/if}
+
+<style>
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    color: #ccc;
+    background: #111;
+  }
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid #2a2a2a;
+    background: #181818;
+  }
+  .topbar h1 {
+    margin: 0;
+    font-size: 0.9rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .conn { font-size: 0.8rem; }
+  .ok { color: #4f4; }
+  .accent { color: #fa4; }
+  .danger { color: #f44; }
+  .workspace {
+    display: flex;
+    flex: 1;
+    min-height: 0; /* allow children to overflow properly */
+  }
+  .middle {
+    flex: 1;
+    overflow-y: auto;
+  }
+</style>

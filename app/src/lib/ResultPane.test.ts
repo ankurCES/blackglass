@@ -10,13 +10,14 @@ import ResultPane from "./ResultPane.svelte";
 
 describe("ResultPane", () => {
   it("shows a placeholder when there is no result", () => {
-    const { getByText } = render(ResultPane, { result: null });
+    const { getByText } = render(ResultPane, { result: null, onAuditClick: () => {} });
     expect(getByText(/no result yet/i)).toBeTruthy();
   });
 
   it("shows stdout when present", () => {
     const { getByText } = render(ResultPane, {
       result: { ok: true, stdout: "hello world", stderr: "", audit_event_id: "e1" },
+      onAuditClick: () => {},
     });
     expect(getByText("hello world")).toBeTruthy();
   });
@@ -34,6 +35,7 @@ describe("ResultPane", () => {
   it("shows the error in red when ok is false", () => {
     const { container, getByTestId } = render(ResultPane, {
       result: { ok: false, error: "gate denied" },
+      onAuditClick: () => {},
     });
     const errEl = getByTestId("error");
     expect(errEl).toBeTruthy();

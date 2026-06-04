@@ -10,13 +10,13 @@ import { DOMAINS } from "./toolCatalog";
 
 describe("DomainRail", () => {
   it("renders one button per domain", () => {
-    const { getAllByRole } = render(DomainRail, { selected: null });
+    const { getAllByRole } = render(DomainRail, { selected: null, onSelect: () => {} });
     const buttons = getAllByRole("button");
     expect(buttons.length).toBe(DOMAINS.length);
   });
 
   it("marks the selected domain as active", () => {
-    const { getByText } = render(DomainRail, { selected: "ad" });
+    const { getByText } = render(DomainRail, { selected: "ad", onSelect: () => {} });
     const adButton = getByText("ad");
     expect(adButton.className).toContain("active");
   });
