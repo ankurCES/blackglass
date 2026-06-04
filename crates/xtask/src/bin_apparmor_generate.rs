@@ -1,4 +1,238 @@
-pub fn run() -> anyhow::Result<()> {
-    println!("xtask apparmor-generate: not yet implemented — Phase 5");
+//! `xtask apparmor-generate` — emit a draft AppArmor profile.
+//!
+//! The output is a complete profile (header + abstractions + rules
+//! + deny list) ready to pipe through `apparmor_parser -K` for
+//! syntax-validation. The intent is to keep the hand-written
+//! profile in `packaging/apparmor/` and this generator in
+//! agreement: when the template changes, regenerate the
+//! hand-written file, then `diff` to confirm.
+//!
+//! Usage:
+//!   cargo run -p xtask -- apparmor-generate             # core profile
+//!   cargo run -p xtask -- apparmor-generate --secondary-sidecar
+
+use anyhow::Result;
+
+/// What profile to emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileKind {
+    Core,
+    SecondarySidecar,
+}
+
+impl ProfileKind {
+    fn from_flag(secondary_sidecar: bool) -> Self {
+        if secondary_sidecar {
+            ProfileKind::SecondarySidecar
+        } else {
+            ProfileKind::Core
+        }
+    }
+
+    fn binary(self) -> &'static str {
+        match self {
+            ProfileKind::Core => "/usr/bin/blackglass-core",
+            ProfileKind::SecondarySidecar => "/usr/bin/blackglass-secondary-sidecar",
+        }
+    }
+
+    fn profile_name(self) -> &'static str {
+        match self {
+            ProfileKind::Core => "blackglass-core",
+            ProfileKind::SecondarySidecar => "blackglass-secondary-sidecar",
+        }
+    }
+
+    fn venv_path(self) -> &'static str {
+        match self {
+            ProfileKind::Core => "/usr/lib/blackglass/python-venv",
+            ProfileKind::SecondarySidecar => {
+                "/usr/lib/blackglass/secondary-sidecar-venv"
+            }
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            ProfileKind::Core => {
+                "blackglass-core — the chokepoint (user-systemd version)."
+            }
+            ProfileKind::SecondarySidecar => {
+                "blackglass-secondary-sidecar — the deepfake detector."
+            }
+        }
+    }
+
+    /// Extra exec rules unique to this profile.
+    fn extra_exec(self) -> &'static str {
+        match self {
+            ProfileKind::Core => {
+                "  # Binaries the core itself runs (MCP children + upstream tools)\n  \
+                 /usr/bin/blackglass-mcp-*                      mrix,\n  \
+                 /usr/bin/blackglass-secondary-sidecar          mrix,\n  \
+                 /usr/bin/nmap                                  mrix,\n  \
+                 /usr/bin/tshark                                mrix,\n  \
+                 /usr/bin/dig                                   mrix,\n  \
+                 /usr/bin/whois                                 mrix,\n  \
+                 /usr/bin/curl                                  mrix,\n  \
+                 /usr/bin/python3*                              mrix,\n"
+            }
+            // The sidecar does not exec MCP children — it only listens
+            // on localhost. Leave this section empty.
+            ProfileKind::SecondarySidecar => "",
+        }
+    }
+
+    /// Extra operator-state rules unique to this profile.
+    fn extra_state(self) -> &'static str {
+        match self {
+            ProfileKind::Core => {
+                "  owner @{HOME}/.local/share/blackglass/runtime.sock     rw,\n  \
+                 owner @{HOME}/.local/share/blackglass/operator.token   r,\n  \
+                 owner @{HOME}/.local/share/blackglass/audit/**         rwk,\n  \
+                 owner @{HOME}/.local/share/blackglass/logs/**          rwk,\n  \
+                 owner @{HOME}/.local/share/blackglass/evidence/**      rwk,\n"
+            }
+            ProfileKind::SecondarySidecar => {
+                "  owner @{HOME}/.local/share/blackglass/secondary-sidecar.log   rwk,\n  \
+                 owner @{HOME}/.local/share/blackglass/secondary-sidecar.state rwk,\n"
+            }
+        }
+    }
+
+    /// Extra deny rules unique to this profile (defense in depth).
+    fn extra_deny(self) -> &'static str {
+        match self {
+            ProfileKind::Core => {
+                "  deny /home/*/.ssh/**                            r,\n"
+            }
+            ProfileKind::SecondarySidecar => {
+                "  deny /home/*/.ssh/**                            r,\n  \
+                 deny /home/*/.local/share/blackglass/audit/**   r,\n  \
+                 deny /home/*/.local/share/blackglass/operator.token r,\n"
+            }
+        }
+    }
+}
+
+/// Render a profile. `kind` selects the template.
+pub fn render(kind: ProfileKind) -> String {
+    let profile = kind.profile_name();
+    let binary = kind.binary();
+    let venv = kind.venv_path();
+    let description = kind.description();
+    let extra_exec = kind.extra_exec();
+    let extra_state = kind.extra_state();
+    let extra_deny = kind.extra_deny();
+    format!(
+        r#"#include <tunables/global>
+
+# {description}
+#
+# This profile confines the {binary_basename} binary. Generated by
+# `xtask apparmor-generate`; the canonical hand-written copy lives
+# in `packaging/apparmor/{profile}`. If the two diverge, update the
+# hand-written one and re-run the generator to confirm.
+
+profile {profile} flags=(attach_disconnected,mediate_deleted) {{
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  # Binary + its venv
+  {binary}                                       mr,
+  {venv}/**                                       r,
+  {venv}/bin/python                               rix,
+{extra_exec}
+  # System config (read-only)
+  /etc/blackglass/**                              r,
+  /etc/apparmor.d/{profile}                       r,
+
+  # Operator state (read+write, owned by the running user)
+  owner @{{HOME}}/.local/share/blackglass/**       rwk,
+{extra_state}
+  owner @{{HOME}}/.config/blackglass/**           r,
+
+  # Network
+  network inet  stream,
+  network inet6 stream,
+  network unix  stream,
+
+  # Deny all writes to system paths + sensitive reads
+  deny /etc/**                                    w,
+  deny /usr/**                                    w,
+  deny /boot/**                                   w,
+  deny /var/lib/blackglass/**                  rwk,
+  deny /var/run/blackglass/**                  rwk,
+  deny /etc/shadow                                r,
+  deny /etc/sudoers                               r,
+  deny /etc/sudoers.d/**                          r,
+  deny /root/**                                rwx,
+{extra_deny}
+  deny ptrace,
+  deny mount,
+  deny pivot_root,
+}}
+"#,
+        description = description,
+        binary_basename = binary.trim_start_matches("/usr/bin/"),
+        binary = binary,
+        venv = venv,
+        extra_exec = extra_exec,
+        extra_state = extra_state,
+        extra_deny = extra_deny,
+        profile = profile,
+    )
+}
+
+pub fn run(secondary_sidecar: bool) -> Result<()> {
+    let kind = ProfileKind::from_flag(secondary_sidecar);
+    print!("{}", render(kind));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_profile_mentions_core_binary() {
+        let s = render(ProfileKind::Core);
+        assert!(s.contains("/usr/bin/blackglass-core"));
+        assert!(s.contains("profile blackglass-core "));
+        assert!(s.contains("/usr/lib/blackglass/python-venv"));
+    }
+
+    #[test]
+    fn secondary_sidecar_profile_mentions_its_binary() {
+        let s = render(ProfileKind::SecondarySidecar);
+        assert!(s.contains("/usr/bin/blackglass-secondary-sidecar"));
+        assert!(s.contains("profile blackglass-secondary-sidecar "));
+        assert!(s.contains("/usr/lib/blackglass/secondary-sidecar-venv"));
+        // The secondary sidecar must NOT have MCP exec rules
+        assert!(!s.contains("/usr/bin/blackglass-mcp-*"));
+    }
+
+    #[test]
+    fn core_profile_includes_audit_and_token() {
+        let s = render(ProfileKind::Core);
+        assert!(s.contains("audit/**"));
+        assert!(s.contains("operator.token"));
+    }
+
+    #[test]
+    fn secondary_sidecar_denies_audit_and_token() {
+        let s = render(ProfileKind::SecondarySidecar);
+        assert!(s.contains("deny /home/*/.local/share/blackglass/audit/**"));
+        assert!(s.contains("deny /home/*/.local/share/blackglass/operator.token"));
+    }
+
+    #[test]
+    fn from_flag() {
+        assert_eq!(ProfileKind::from_flag(false), ProfileKind::Core);
+        assert_eq!(
+            ProfileKind::from_flag(true),
+            ProfileKind::SecondarySidecar
+        );
+    }
 }
