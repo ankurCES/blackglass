@@ -133,8 +133,12 @@ async fn main() -> Result<()> {
             .with_python_bridge(python_bridge_impl);
             // Sub-plan 3: operator socket (Tauri UI). Runs concurrently with
             // the runtime socket accept loop below. We pass it the same
-            // broker (to resolve confirmations) and the same channel (to
-            // subscribe to pending confirmations).
+            // broker (to resolve confirmations), the same channel (to
+            // subscribe to pending confirmations), and a read-only handle
+            // to the audit chain (for `audit.query` / `audit.verify_chain`).
+            // We re-open the chain on the same path because `Chokepoint`
+            // already owns its `Chain` by value, and the operator socket
+            // only needs `&Chain` (read-only query/verify).
             let data_dir = socket
                 .parent()
                 .map(|p| p.to_path_buf())
@@ -142,11 +146,13 @@ async fn main() -> Result<()> {
             let operator_sock = data_dir.join("operator.sock");
             let op_broker = broker.clone();
             let op_channel = channel.clone();
+            let op_chain = Arc::new(Chain::open(&audit)?);
             tokio::spawn(async move {
                 if let Err(e) = blackglass_core::operator_server::run(
                     &operator_sock,
                     op_broker,
                     op_channel,
+                    op_chain,
                 )
                 .await
                 {

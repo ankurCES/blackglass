@@ -90,8 +90,9 @@ async fn destructive_action_requires_operator_allow() {
     let op_broker = broker.clone();
     let op_channel = channel.clone();
     let op_sock = operator_sock.clone();
+    let op_chain = std::sync::Arc::new(Chain::open(&audit_path).unwrap());
     let operator_handle = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(5), run_operator(&op_sock, op_broker, op_channel)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), run_operator(&op_sock, op_broker, op_channel, op_chain)).await;
     });
 
     // Wait for both sockets to come up.
@@ -232,8 +233,9 @@ async fn destructive_action_can_be_denied_by_operator() {
     let op_broker = broker.clone();
     let op_channel = channel.clone();
     let op_sock = operator_sock.clone();
+    let op_chain = std::sync::Arc::new(Chain::open(&audit_path).unwrap());
     let operator_handle = tokio::spawn(async move {
-        let _ = tokio::time::timeout(Duration::from_secs(5), run_operator(&op_sock, op_broker, op_channel)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), run_operator(&op_sock, op_broker, op_channel, op_chain)).await;
     });
 
     for path in [&runtime_sock, &operator_sock] {

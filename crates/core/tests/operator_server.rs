@@ -1,5 +1,7 @@
+use blackglass_audit::Chain;
 use blackglass_core::broker::ConfirmationBroker;
 use blackglass_core::operator_server::{run, ConfirmChannel, ConfirmRequest};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -8,12 +10,14 @@ use tokio::net::UnixStream;
 async fn accepts_connections_and_survives_malformed_input() {
     let dir = tempfile::tempdir().unwrap();
     let sock_path = dir.path().join("operator.sock");
+    let chain_path = dir.path().join("chain.jsonl");
     let broker = ConfirmationBroker::new();
     let channel = ConfirmChannel::new();
+    let chain = Arc::new(Chain::open(&chain_path).unwrap());
 
     let server = tokio::spawn({
         let p = sock_path.clone();
-        async move { run(&p, broker, channel).await }
+        async move { run(&p, broker, channel, chain).await }
     });
 
     for _ in 0..50 {
@@ -56,13 +60,15 @@ async fn accepts_connections_and_survives_malformed_input() {
 async fn channel_push_forwards_to_connected_client() {
     let dir = tempfile::tempdir().unwrap();
     let sock_path = dir.path().join("operator.sock");
+    let chain_path = dir.path().join("chain.jsonl");
     let broker = ConfirmationBroker::new();
     let channel = ConfirmChannel::new();
+    let chain = Arc::new(Chain::open(&chain_path).unwrap());
 
     let server = tokio::spawn({
         let p = sock_path.clone();
         let c = channel.clone();
-        async move { run(&p, broker, c).await }
+        async move { run(&p, broker, c, chain).await }
     });
 
     for _ in 0..50 {

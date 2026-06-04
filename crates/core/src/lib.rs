@@ -1,3 +1,4 @@
+pub mod audit_query;
 pub mod broker;
 pub mod chokepoint;
 pub mod gates;

@@ -104,6 +104,9 @@ impl Chain {
 
     pub fn last_hash(&self) -> Option<&str> { self.last.as_deref() }
 
+    /// Path to the on-disk chain file.
+    pub fn path(&self) -> &std::path::Path { &self.path }
+
     pub fn append(&mut self, mut event: Event) -> Result<String, AuditError> {
         if event.prev_hash.is_empty() {
             event.prev_hash = self.last.clone().unwrap_or_else(|| "0".repeat(64));

@@ -9,7 +9,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 
+use crate::audit_query;
 use crate::broker::{ConfirmationBroker, Decision};
+use blackglass_audit::Chain;
 
 /// A `confirm.request` event to be pushed to a connected operator.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -57,6 +59,7 @@ pub async fn run(
     sock_path: &Path,
     broker: ConfirmationBroker,
     channel: ConfirmChannel,
+    chain: Arc<Chain>,
 ) -> std::io::Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -71,8 +74,9 @@ pub async fn run(
         let (stream, _addr) = listener.accept().await?;
         let broker = broker.clone();
         let channel = channel.clone();
+        let chain = chain.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(stream, broker, channel).await {
+            if let Err(e) = handle(stream, broker, channel, chain).await {
                 eprintln!("operator socket handler error: {e}");
             }
         });
@@ -83,6 +87,7 @@ async fn handle(
     stream: UnixStream,
     broker: ConfirmationBroker,
     channel: Arc<ConfirmChannel>,
+    chain: Arc<Chain>,
 ) -> std::io::Result<()> {
     let (read, write) = stream.into_split();
     // The write half is shared between two tasks:
@@ -128,7 +133,7 @@ async fn handle(
 
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
         let resp = match parsed {
-            Ok(v) => handle_rpc(v, &broker).await,
+            Ok(v) => handle_rpc(v, &broker, &chain).await,
             Err(_) => Some(jsonrpc_error(None, -32700, "parse error")),
         };
 
@@ -143,7 +148,11 @@ async fn handle(
     Ok(())
 }
 
-async fn handle_rpc(v: serde_json::Value, broker: &ConfirmationBroker) -> Option<String> {
+async fn handle_rpc(
+    v: serde_json::Value,
+    broker: &ConfirmationBroker,
+    chain: &Chain,
+) -> Option<String> {
     let id = v.get("id").cloned();
     let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = v.get("params").cloned().unwrap_or(serde_json::json!({}));
@@ -168,6 +177,25 @@ async fn handle_rpc(v: serde_json::Value, broker: &ConfirmationBroker) -> Option
             let _ = result;
             Some(jsonrpc_ok(id, serde_json::json!({ "resolved": true })))
         }
+        // TODO: gate on auth in 2.5.7 — these two methods are currently
+        // reachable by any connected client. The auth flow will require
+        // the client to complete `auth` first; we will then return
+        // JSON-RPC error code -32001 for every other method until the
+        // client has authenticated.
+        "audit.query" => match serde_json::from_value::<audit_query::QueryParams>(params) {
+            Ok(p) => match audit_query::handle_query(chain, p) {
+                Ok(resp) => match serde_json::to_value(&resp) {
+                    Ok(v) => Some(jsonrpc_ok(id, v)),
+                    Err(e) => Some(jsonrpc_error(id, -32603, &format!("serialize: {e}"))),
+                },
+                Err(e) => Some(jsonrpc_error(id, -32603, &format!("audit: {e}"))),
+            },
+            Err(e) => Some(jsonrpc_error(id, -32602, &format!("invalid params: {e}"))),
+        },
+        "audit.verify_chain" => match audit_query::handle_verify(chain) {
+            Ok(count) => Some(jsonrpc_ok(id, serde_json::json!(count))),
+            Err(e) => Some(jsonrpc_error(id, -32603, &format!("audit: {e}"))),
+        },
         _ => Some(jsonrpc_error(id, -32601, "method not found")),
     }
 }
