@@ -413,7 +413,10 @@ impl OperatorAuth {
         }
         let meta = fs::metadata(&self.token_path)?;
         let mode = meta.permissions().mode() & 0o777;
-        if mode != REQUIRED_MODE {
+        // Reject any group/other access. Accepts 0o600 (rw for owner),
+        // 0o400 (r-only for owner), 0o700 (rwx for owner), etc. — any
+        // mode where the group/other permission bits are all zero.
+        if mode & 0o077 != 0 {
             return Err(AuthError::TokenFileBadMode(self.token_path.clone(), mode));
         }
         let expected = fs::read_to_string(&self.token_path)?;
