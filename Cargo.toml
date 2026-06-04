@@ -11,6 +11,7 @@ members = [
     "crates/mcp-osint",
     "crates/mcp-packets",
     "crates/python-bridge",
+    "crates/polkit-helper",
     "app/src-tauri",
 ]
 
@@ -36,6 +37,7 @@ rand = "0.8"
 hex = "0.4"
 ipnetwork = "0.20"
 async-trait = "0.1"
+nix = { version = "0.29", features = ["user", "process"] }
 tempfile = "3"
 proptest = "1"
 assert_cmd = "2"
